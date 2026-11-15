@@ -326,7 +326,7 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
                       textAnchor="end"
                       fill="#64748b"
                       fontSize="9"
-                      fontFamily="monospace"
+                      fontFamily="var(--font-sans)"
                     >
                       {pctMark}%
                     </text>
@@ -361,7 +361,7 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
                       textAnchor="middle"
                       fill="#cbd5e1"
                       fontSize="9"
-                      fontFamily="monospace"
+                      fontFamily="var(--font-sans)"
                     >
                       {pct.toFixed(1)}
                     </text>
@@ -372,7 +372,7 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
                       fill={isLatest ? '#ffffff' : '#94a3b8'}
                       fontWeight={isLatest ? '700' : '500'}
                       fontSize="11"
-                      fontFamily="monospace"
+                      fontFamily="var(--font-sans)"
                     >
                       {d}
                     </text>

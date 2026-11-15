@@ -14,6 +14,7 @@ import { MetaTraderPage, MtClosedTrade } from './pages/MetaTraderPage';
 import { useDerivPublicTicks } from './lib/useDerivPublicTicks';
 import {
   AccountInfo,
+  ActiveTrade,
   AppSnapshot,
   BotSettings,
   DEFAULT_SETTINGS,
@@ -108,6 +109,7 @@ export default function App() {
 
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [session, setSession] = useState<SessionStats>(INITIAL_SESSION);
+  const [activeTrade, setActiveTrade] = useState<ActiveTrade | null>(null);
   const [trades, setTrades] = useState<TradeRecord[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [strategies, setStrategies] = useState<SavedStrategy[]>([]);
@@ -213,6 +215,7 @@ export default function App() {
       tryAutoReconnect();
     }
     setSession(snap.session);
+    setActiveTrade(snap.activeTrade ?? null);
     setTrades(snap.trades ?? []);
     setLogs(snap.logs ?? []);
     setStrategies(snap.strategies ?? []);
@@ -281,6 +284,14 @@ export default function App() {
       }
     });
 
+    es.addEventListener('active_trade', (e) => {
+      try {
+        setActiveTrade(JSON.parse((e as MessageEvent).data));
+      } catch {
+        // ignore
+      }
+    });
+
     es.addEventListener('trade', (e) => {
       try {
         const record: TradeRecord = JSON.parse((e as MessageEvent).data);
@@ -291,6 +302,7 @@ export default function App() {
     });
 
     es.addEventListener('trades_reset', () => {
+      setActiveTrade(null);
       setTrades([]);
     });
 
@@ -523,7 +535,8 @@ export default function App() {
         onOpenTokenModal={() => setTokenModalOpen(true)}
       />
 
-      <main className="w-full flex-1 px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-24 md:pb-8">
+      <div className="flex flex-1 min-h-0 w-full relative">
+        <main className="flex-1 min-w-0 px-3 sm:px-6 lg:px-8 pt-4 sm:pt-6 pb-36 md:pb-20 lg:pb-8 overflow-x-hidden">
         {activeTab === 'terminal' && (
           <div className="space-y-4 sm:space-y-5">
             {/* Terminal Sub-Tabs: Trading Terminal | Saved Strategies | Trade Ledger */}
@@ -576,7 +589,7 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Main 3-Pane Trading Terminal: Strategy Config | Live Market + Ledger | Run Panel */}
+                {/* Main 3-Pane Trading Terminal: Strategy Config | Live Market + Metrics | Run Panel */}
                 <div className="flex flex-col lg:flex-row items-start gap-5">
                   <div className="w-full lg:w-[340px] xl:w-[360px] shrink-0">
                     <StrategyConfigPanel
@@ -584,10 +597,6 @@ export default function App() {
                       onChange={handleSettingsChange}
                       onMarketPreviewChange={handleMarketPreviewChange}
                       session={session}
-                      connected={Boolean(account?.connected)}
-                      onOpenTokenModal={() => setTokenModalOpen(true)}
-                      onStartTrading={handleStartTrading}
-                      onStopTrading={handleStopTrading}
                       onSaveStrategy={(name) => handleSaveStrategy(name)}
                       actionError={actionError}
                     />
@@ -656,25 +665,7 @@ export default function App() {
                     </section>
 
                     <TickChart market={tickMarket} ticks={ticks} />
-
-                    <TradeLedgerTable trades={trades} compact />
                   </div>
-
-                  {/* Right-Side Collapsible Run Panel */}
-                  <RunPanel
-                    open={runPanelOpen}
-                    onToggleOpen={() => setRunPanelOpen(!runPanelOpen)}
-                    session={session}
-                    settings={settings}
-                    trades={trades}
-                    logs={logs}
-                    currency={currency}
-                    connected={Boolean(account?.connected)}
-                    onOpenTokenModal={() => setTokenModalOpen(true)}
-                    onStartTrading={handleStartTrading}
-                    onStopTrading={handleStopTrading}
-                    onResetStats={handleResetStats}
-                  />
                 </div>
               </>
             )}
@@ -702,11 +693,7 @@ export default function App() {
             connected={Boolean(account?.connected)}
             currency={currency}
             onSubscribeMarkets={handleSubscribeMultiMarkets}
-            onStartWithSettings={async (s) => {
-              await startWithSettings(s);
-              setActiveTab('terminal');
-              setTerminalSubTab('terminal');
-            }}
+            onStartWithSettings={startWithSettings}
             onStopTrading={handleStopTrading}
             onLoadToTerminal={handleLoadStrategy}
           />
@@ -720,11 +707,7 @@ export default function App() {
             currentSettings={settings}
             onSubscribeMarkets={handleSubscribeMultiMarkets}
             onLoadToTerminal={handleLoadStrategy}
-            onStartWithSettings={async (s) => {
-              await startWithSettings(s);
-              setActiveTab('terminal');
-              setTerminalSubTab('terminal');
-            }}
+            onStartWithSettings={startWithSettings}
           />
         )}
 
@@ -733,11 +716,7 @@ export default function App() {
             connected={Boolean(account?.connected)}
             session={session}
             currency={currency}
-            onStartWithSettings={async (s) => {
-              await startWithSettings(s);
-              setActiveTab('terminal');
-              setTerminalSubTab('terminal');
-            }}
+            onStartWithSettings={startWithSettings}
             onStopTrading={handleStopTrading}
             onLoadToTerminal={handleLoadStrategy}
             onSaveStrategy={handleSaveStrategy}
@@ -753,7 +732,24 @@ export default function App() {
             onSubscribeMarkets={handleSubscribeMultiMarkets}
           />
         )}
-      </main>
+        </main>
+
+        {/* Global Run Panel across ALL pages (Full-height Docked Sidebar on lg+, Expandable Bottom Drawer on mobile) */}
+        <RunPanel
+          open={runPanelOpen}
+          onToggleOpen={() => setRunPanelOpen(!runPanelOpen)}
+          session={session}
+          settings={settings}
+          activeTrade={activeTrade}
+          trades={trades}
+          logs={logs}
+          currency={currency}
+          connected={Boolean(account?.connected)}
+          onStartTrading={handleStartTrading}
+          onStopTrading={handleStopTrading}
+          onResetStats={handleResetStats}
+        />
+      </div>
 
       <TokenModal
         open={tokenModalOpen}

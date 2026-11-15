@@ -4,6 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type {
   AccountInfo,
+  ActiveTrade,
   AppSnapshot,
   AuthMode,
   BotSettings,
@@ -283,9 +284,11 @@ export class DerivBotEngine {
   private accountConn: DerivWsConnection | null = null;
   private tickConn: DerivWsConnection | null = null;
   private tickMarket = 'R_100';
+  private tickConnectingMarket: string | null = null;
   private ticks: TickPoint[] = [];
 
   private multiTickConn: DerivWsConnection | null = null;
+  private multiConnectPromise: Promise<DerivWsConnection> | null = null;
   private multiSubscribedSymbols = new Set<string>();
   private multiTicks: Record<string, TickPoint[]> = {};
 
@@ -299,6 +302,7 @@ export class DerivBotEngine {
   private cfCache = new Map<string, any[]>();
 
   private session: SessionStats = this.createIdleSession();
+  private activeTrade: ActiveTrade | null = null;
   private stopRequested = false;
   private activeLoopPromise: Promise<void> | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
@@ -364,10 +368,16 @@ export class DerivBotEngine {
     this.emit('log', entry);
   }
 
+  private setActiveTrade(trade: ActiveTrade | null): void {
+    this.activeTrade = trade;
+    this.emit('active_trade', trade);
+  }
+
   getSnapshot(): AppSnapshot {
     return {
       account: this.account,
       session: this.session,
+      activeTrade: this.activeTrade,
       trades: this.trades,
       logs: this.logs,
       strategies: this.strategies,
@@ -559,11 +569,16 @@ export class DerivBotEngine {
     if (!MARKET_DECIMALS[market]) {
       throw new Error(`Unsupported market: ${market}`);
     }
-    if (this.tickMarket === market && this.tickConn?.isOpen() && this.ticks.length > 0) {
+    if (
+      this.tickMarket === market &&
+      ((this.tickConn?.isOpen() && this.ticks.length > 0) ||
+        this.tickConnectingMarket === market)
+    ) {
       return;
     }
 
     this.tickMarket = market;
+    this.tickConnectingMarket = market;
     this.ticks = [];
     this.emit('ticks_reset', { market });
 
@@ -630,6 +645,10 @@ export class DerivBotEngine {
       if (!conn.wasClosedByCaller()) {
         this.addLog('warn', `Market stream error: ${err?.message ?? 'Disconnected'}`);
       }
+    } finally {
+      if (this.tickConnectingMarket === market) {
+        this.tickConnectingMarket = null;
+      }
     }
   }
 
@@ -640,44 +659,56 @@ export class DerivBotEngine {
     ).slice(0, 20);
     if (valid.length === 0) return;
 
-    if (!this.multiTickConn || !this.multiTickConn.isOpen()) {
-      const conn = new DerivWsConnection();
-      this.multiTickConn = conn;
-      this.multiSubscribedSymbols.clear();
-      await conn.connect(PUBLIC_WS_URL, 20_000, {
-        'Deriv-App-ID': DERIV_DATA_APP_ID,
-      });
-      conn.onMessage((msg) => {
-        if (msg.msg_type === 'history' && msg.history && msg.echo_req?.ticks_history) {
-          const sym = String(msg.echo_req.ticks_history);
-          const prices: number[] = msg.history.prices ?? [];
-          const times: number[] = msg.history.times ?? [];
-          const pts: TickPoint[] = prices.map((p, i) => ({
-            epoch: times[i] ?? Math.floor(Date.now() / 1000),
-            quote: Number(p),
-            lastDigit: extractLastDigit(Number(p), sym),
-          }));
-          this.multiTicks[sym] = pts.slice(-200);
-          this.emit('multi_ticks', { symbol: sym, ticks: this.multiTicks[sym] });
-        } else if (msg.msg_type === 'tick' && msg.tick) {
-          const sym = String(msg.tick.symbol);
-          const q = Number(msg.tick.quote);
-          const pt: TickPoint = {
-            epoch: Number(msg.tick.epoch),
-            quote: q,
-            lastDigit: extractLastDigit(q, sym),
-          };
-          const prev = this.multiTicks[sym] ?? [];
-          this.multiTicks[sym] = [...prev, pt].slice(-200);
-          this.emit('multi_tick', { symbol: sym, tick: pt });
-        }
-      });
+    let conn = this.multiTickConn;
+    if (!conn || !conn.isOpen()) {
+      if (!this.multiConnectPromise) {
+        this.multiConnectPromise = (async () => {
+          if (this.multiTickConn) {
+            await this.multiTickConn.close().catch(() => {});
+          }
+          const nextConn = new DerivWsConnection();
+          this.multiTickConn = nextConn;
+          this.multiSubscribedSymbols.clear();
+          await nextConn.connect(PUBLIC_WS_URL, 20_000, {
+            'Deriv-App-ID': DERIV_DATA_APP_ID,
+          });
+          nextConn.onMessage((msg) => {
+            if (msg.msg_type === 'history' && msg.history && msg.echo_req?.ticks_history) {
+              const sym = String(msg.echo_req.ticks_history);
+              const prices: number[] = msg.history.prices ?? [];
+              const times: number[] = msg.history.times ?? [];
+              const pts: TickPoint[] = prices.map((p, i) => ({
+                epoch: times[i] ?? Math.floor(Date.now() / 1000),
+                quote: Number(p),
+                lastDigit: extractLastDigit(Number(p), sym),
+              }));
+              this.multiTicks[sym] = pts.slice(-200);
+              this.emit('multi_ticks', { symbol: sym, ticks: this.multiTicks[sym] });
+            } else if (msg.msg_type === 'tick' && msg.tick) {
+              const sym = String(msg.tick.symbol);
+              const q = Number(msg.tick.quote);
+              const pt: TickPoint = {
+                epoch: Number(msg.tick.epoch),
+                quote: q,
+                lastDigit: extractLastDigit(q, sym),
+              };
+              const prev = this.multiTicks[sym] ?? [];
+              this.multiTicks[sym] = [...prev, pt].slice(-200);
+              this.emit('multi_tick', { symbol: sym, tick: pt });
+            }
+          });
+          return nextConn;
+        })().finally(() => {
+          this.multiConnectPromise = null;
+        });
+      }
+      conn = await this.multiConnectPromise;
     }
 
     const toSubscribe = valid.filter((sym) => !this.multiSubscribedSymbols.has(sym));
     for (const sym of toSubscribe) {
       this.multiSubscribedSymbols.add(sym);
-      this.multiTickConn
+      conn
         .request({
           ticks_history: sym,
           adjust_start_time: 1,
@@ -1344,7 +1375,8 @@ export class DerivBotEngine {
   private async waitSettled(
     conn: DerivWsConnection,
     contractIds: string[],
-    ensureConn: () => Promise<DerivWsConnection>
+    ensureConn: () => Promise<DerivWsConnection>,
+    onEntrySpot?: (entrySpot: number, currentSpot?: number) => void
   ): Promise<{ profits: Record<string, number>; entrySpot?: number; exitSpot?: number }> {
     const profits: Record<string, number> = {};
     let entrySpot: number | undefined;
@@ -1370,7 +1402,15 @@ export class DerivBotEngine {
             }
             const poc = msg.proposal_open_contract;
             if (poc && contractIds.includes(String(poc.contract_id))) {
-              if (poc.entry_spot !== undefined) entrySpot = Number(poc.entry_spot);
+              if (poc.entry_spot !== undefined) {
+                entrySpot = Number(poc.entry_spot);
+                onEntrySpot?.(
+                  entrySpot,
+                  poc.current_spot !== undefined ? Number(poc.current_spot) : undefined
+                );
+              } else if (poc.current_spot !== undefined && entrySpot !== undefined) {
+                onEntrySpot?.(entrySpot, Number(poc.current_spot));
+              }
               if (poc.exit_tick !== undefined) exitSpot = Number(poc.exit_tick);
               if (poc.is_sold) {
                 profits[String(poc.contract_id)] = Number(poc.profit);
@@ -1401,7 +1441,13 @@ export class DerivBotEngine {
               }
               const poc = subRes?.proposal_open_contract;
               if (poc) {
-                if (poc.entry_spot !== undefined) entrySpot = Number(poc.entry_spot);
+                if (poc.entry_spot !== undefined) {
+                  entrySpot = Number(poc.entry_spot);
+                  onEntrySpot?.(
+                    entrySpot,
+                    poc.current_spot !== undefined ? Number(poc.current_spot) : undefined
+                  );
+                }
                 if (poc.exit_tick !== undefined) exitSpot = Number(poc.exit_tick);
                 if (poc.is_sold) {
                   profits[String(poc.contract_id)] = Number(poc.profit);
@@ -1441,7 +1487,9 @@ export class DerivBotEngine {
     currency: string,
     ticks: number,
     authMode: AuthMode,
-    ensureConn: () => Promise<DerivWsConnection>
+    ensureConn: () => Promise<DerivWsConnection>,
+    onPurchased?: (contractIds: string[]) => void,
+    onEntrySpot?: (entrySpot: number, currentSpot?: number) => void
   ): Promise<{
     profit: number;
     contractIds: string[];
@@ -1469,7 +1517,8 @@ export class DerivBotEngine {
     }
 
     const cid = String(buyRes.buy.contract_id);
-    const settled = await this.waitSettled(conn, [cid], ensureConn);
+    onPurchased?.([cid]);
+    const settled = await this.waitSettled(conn, [cid], ensureConn, onEntrySpot);
     return {
       profit: settled.profits[cid] ?? 0,
       contractIds: [cid],
@@ -1486,7 +1535,9 @@ export class DerivBotEngine {
     currency: string,
     ticks: number,
     authMode: AuthMode,
-    ensureConn: () => Promise<DerivWsConnection>
+    ensureConn: () => Promise<DerivWsConnection>,
+    onPurchased?: (contractIds: string[]) => void,
+    onEntrySpot?: (entrySpot: number, currentSpot?: number) => void
   ): Promise<{
     profit: number;
     legs: number[];
@@ -1538,7 +1589,8 @@ export class DerivBotEngine {
       throw new Error(errs[0] || 'Failed to buy dual legs');
     }
 
-    const settled = await this.waitSettled(conn, cids, ensureConn);
+    onPurchased?.(cids);
+    const settled = await this.waitSettled(conn, cids, ensureConn, onEntrySpot);
     if (errs.length > 0) {
       const partial = cids.reduce((acc, c) => acc + (settled.profits[c] ?? 0), 0);
       throw new Error(`One leg failed (${errs[0]}). Other leg settled ${partial >= 0 ? '+' : ''}${partial.toFixed(2)}.`);
@@ -1721,6 +1773,7 @@ export class DerivBotEngine {
     if (this.session.status === 'running' || this.session.status === 'stopping') {
       throw new Error('Stop the bot before resetting statistics.');
     }
+    this.setActiveTrade(null);
     this.trades = [];
     this.logs = [];
     this.session = this.createIdleSession();
@@ -1986,11 +2039,44 @@ export class DerivBotEngine {
         let exitSpot: number | undefined;
         let legs: number[] | undefined;
 
-        this.session = {
-          ...this.session,
-          contractStage: this.stopRequested ? 'IS_STOPPING' : 'CONTRACT_OPEN',
+        const effectiveStake = DUAL_TYPES.includes(t) ? Number((stake * 2).toFixed(2)) : stake;
+        const activeId = crypto.randomUUID();
+        const emitActiveContract = (cids: string[], entry?: number, current?: number) => {
+          this.setActiveTrade({
+            id: activeId,
+            isVirtual: false,
+            market: s.market,
+            marketLabel: MARKET_LABELS[s.market] || s.market,
+            contractType: t,
+            label,
+            contractIds: cids,
+            stake: effectiveStake,
+            currency,
+            ticks: tk,
+            entrySpot: entry,
+            currentSpot: current,
+            timestamp: nowIso(),
+          });
         };
-        this.emit('session', this.session);
+
+        const handlePurchased = (cids: string[]) => {
+          this.session = {
+            ...this.session,
+            contractStage: this.stopRequested ? 'IS_STOPPING' : 'CONTRACT_OPEN',
+          };
+          this.emit('session', this.session);
+          emitActiveContract(cids);
+        };
+
+        const handleEntrySpot = (entry: number, current?: number) => {
+          if (this.activeTrade && this.activeTrade.id === activeId) {
+            this.setActiveTrade({
+              ...this.activeTrade,
+              entrySpot: entry,
+              currentSpot: current,
+            });
+          }
+        };
 
         if (DUAL_TYPES.includes(t)) {
           const res = await this.executeDualContract(
@@ -2001,7 +2087,9 @@ export class DerivBotEngine {
             currency,
             tk,
             authMode,
-            ensureAccountConn
+            ensureAccountConn,
+            handlePurchased,
+            handleEntrySpot
           );
           profit = res.profit;
           legs = res.legs;
@@ -2018,7 +2106,9 @@ export class DerivBotEngine {
             currency,
             tk,
             authMode,
-            ensureAccountConn
+            ensureAccountConn,
+            handlePurchased,
+            handleEntrySpot
           );
           profit = res.profit;
           contractIds = res.contractIds;
@@ -2026,10 +2116,10 @@ export class DerivBotEngine {
           exitSpot = res.exitSpot;
         }
 
+        this.setActiveTrade(null);
         total = Number((total + profit).toFixed(2));
         const won = profit > 0;
         seq += 1;
-        const effectiveStake = DUAL_TYPES.includes(t) ? Number((stake * 2).toFixed(2)) : stake;
         const payout = profit > 0 ? Number((effectiveStake + profit).toFixed(2)) : 0;
 
         let balanceAfter = this.account?.balance;
@@ -2183,6 +2273,7 @@ export class DerivBotEngine {
       this.emit('session', this.session);
       this.addLog('error', `Session halted: ${msg}`);
     } finally {
+      this.setActiveTrade(null);
       if (virtualConn) {
         await virtualConn.close().catch(() => {});
       }

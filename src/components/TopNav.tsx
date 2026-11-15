@@ -127,7 +127,7 @@ export const TopNav: React.FC<TopNavProps> = ({
 
       {/* Mobile Fixed Bottom Navigation Bar */}
       <nav
-        className="fixed bottom-0 inset-x-0 z-40 grid grid-cols-5 border-t border-[#1F2937] bg-[#0B0F17]/95 backdrop-blur-md md:hidden"
+        className="fixed bottom-0 inset-x-0 z-40 grid h-[58px] grid-cols-5 border-t border-[#1F2937] bg-[#0B0F17]/95 backdrop-blur-md md:hidden"
         aria-label="Mobile navigation"
       >
         {NAV_ITEMS.map((item) => {
@@ -137,7 +137,7 @@ export const TopNav: React.FC<TopNavProps> = ({
               key={item.id}
               type="button"
               onClick={() => onTabChange(item.id)}
-              className={`flex flex-col items-center justify-center gap-1 py-2 min-h-[58px] text-[11px] font-medium transition-colors ${
+              className={`flex flex-col items-center justify-center gap-1 h-full text-[11px] font-medium transition-colors ${
                 active ? 'text-[#ff444f]' : 'text-slate-400 hover:text-slate-200'
               }`}
             >

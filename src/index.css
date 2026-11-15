@@ -2,7 +2,7 @@
 
 @theme {
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-mono: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
 }
 
 :root {
@@ -20,11 +20,14 @@
 @layer base {
   html {
     font-family: var(--font-sans);
+    font-feature-settings: "zero" 0;
     color-scheme: dark;
   }
 
+  .font-mono,
   .tabular-nums {
     font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 0;
   }
 }
 

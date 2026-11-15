@@ -201,6 +201,22 @@ export interface LogEntry {
   message: string;
 }
 
+export interface ActiveTrade {
+  id: string;
+  isVirtual: boolean;
+  market: string;
+  marketLabel: string;
+  contractType: TradeType;
+  label: string;
+  contractIds: string[];
+  stake: number;
+  currency: string;
+  ticks: number;
+  entrySpot?: number;
+  currentSpot?: number;
+  timestamp: string;
+}
+
 export interface OpenPosition {
   id: string;
   symbol: string;
@@ -216,6 +232,7 @@ export interface OpenPosition {
 export interface AppSnapshot {
   account: AccountInfo | null;
   session: SessionStats;
+  activeTrade?: ActiveTrade | null;
   trades: TradeRecord[];
   logs: LogEntry[];
   strategies: SavedStrategy[];

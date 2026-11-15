@@ -1,7 +1,5 @@
 import React, { useState } from 'react';
 import {
-  Play,
-  Square,
   Plus,
   Trash2,
   ArrowUp,
@@ -26,10 +24,6 @@ interface StrategyConfigPanelProps {
   onChange: (next: BotSettings) => void;
   onMarketPreviewChange: (market: string) => void;
   session: SessionStats;
-  connected: boolean;
-  onOpenTokenModal: () => void;
-  onStartTrading: () => void;
-  onStopTrading: () => void;
   onSaveStrategy: (name: string) => Promise<void>;
   actionError: string | null;
 }
@@ -39,10 +33,6 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
   onChange,
   onMarketPreviewChange,
   session,
-  connected,
-  onOpenTokenModal,
-  onStartTrading,
-  onStopTrading,
   onSaveStrategy,
   actionError,
 }) => {
@@ -737,48 +727,6 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
           <div className="rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
             {actionError}
           </div>
-        )}
-      </div>
-
-      {/* Primary Action Footer */}
-      <div className="border-t border-[#1F2937] p-5 space-y-2">
-        {!connected ? (
-          <>
-            <button
-              type="button"
-              disabled
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#1F2937] px-4 py-2.5 text-sm font-semibold text-slate-400 cursor-not-allowed"
-            >
-              <Play className="h-4 w-4 fill-current" />
-              <span>Start Trading Bot</span>
-            </button>
-            <p className="text-center text-[11px] text-slate-500">
-              Use Connect API Token in the top navigation bar to authorize trading.
-            </p>
-          </>
-        ) : isRunning ? (
-          <button
-            type="button"
-            onClick={onStopTrading}
-            disabled={session.status === 'stopping'}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-red-500 disabled:opacity-60"
-          >
-            <Square className="h-4 w-4 fill-current" />
-            <span>
-              {session.status === 'stopping'
-                ? 'Stopping After Current Trade...'
-                : 'Stop Trading Bot'}
-            </span>
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onStartTrading}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-500"
-          >
-            <Play className="h-4 w-4 fill-current" />
-            <span>Start Trading Bot</span>
-          </button>
         )}
       </div>
     </aside>
