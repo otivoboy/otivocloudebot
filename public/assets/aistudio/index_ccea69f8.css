@@ -1,0 +1,1991 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Bebas+Neue&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@keyframes scan {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100%); }
+}
+
+@keyframes moveShimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.logo-skeleton {
+    width: 32px;
+    height: 32px;
+    background-color: #1f2121;
+    border-radius: 50%;
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.balance-skeleton {
+    width: 120px;
+    height: 14px;
+    background-color: #1f2121;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+}
+
+.logo-skeleton::after,
+.balance-skeleton::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(212, 175, 55, 0.25) 50%, 
+        transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: moveShimmer 1.5s infinite linear;
+}
+
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-shimmer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  animation: shimmer 2s infinite;
+}
+
+.animate-rotate {
+  animation: rotate 10s linear infinite;
+}
+
+@keyframes shineReverse {
+    0% {
+        background-position: 100% center;
+    }
+    100% {
+        background-position: -100% center;
+    }
+}
+
+.title-shine {
+    color: rgba(255, 255, 255, 0.15);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    background: linear-gradient(
+        to left, 
+        transparent 0%, 
+        rgba(255, 255, 255, 0.1) 30%, 
+        rgba(255, 255, 255, 1) 50%, 
+        rgba(255, 255, 255, 0.1) 70%, 
+        transparent 100%
+    );
+    background-size: 200% auto;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shineReverse 3s linear infinite;
+    filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.2));
+    transition: filter 0.3s ease;
+    font-family: 'Times New Roman', Times, serif;
+}
+
+.title-shine:hover {
+    filter: drop-shadow(0 0 15px rgba(255, 255, 255, 0.5));
+}
+
+@layer utilities {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #2d2f2f;
+    border-radius: 10px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #ff444f;
+  }
+  .safe-scrolling {
+    -webkit-overflow-scrolling: touch;
+    transform: translate3d(0, 0, 0);
+    -webkit-transform: translate3d(0, 0, 0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    will-change: scroll-position, transform;
+  }
+  .safe-compositing {
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    perspective: 1000px;
+    -webkit-perspective: 1000px;
+    will-change: transform, opacity;
+    contain: layout style;
+  }
+}
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-jazz: "Bebas Neue", sans-serif;
+  --font-outfit: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  * {
+    font-feature-settings: "cv19" 2;
+  }
+  body {
+    @apply font-sans;
+    /* Prevent pull-to-refresh on mobile PWA */
+    overscroll-behavior-y: contain;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Standalone PWA Specific Styles */
+@media (display-mode: standalone) {
+  body {
+    background-color: #000000;
+    /* Adjust for notch/safe area */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  /* Hide scrollbars in standalone mode for a cleaner app look */
+  ::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Disable selection in standalone mode to feel more like a native app */
+  * {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Re-enable selection for inputs and textareas */
+  input, textarea, [contenteditable="true"] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+}
+
+/* Blockly Custom Styles */
+:root {
+  --black: #0e0e0e;
+  --colour-numPadBackground: var(--black);
+  --colour-numPadBorder: var(--black);
+  --colour-text: var(--black);
+  --colour-numPadActiveBackground: var(--black);
+  --colour-scrollbarHover: var(--black);
+  --colour-scrollbar: var(--black);
+  --colour-flyout: var(--black);
+  --colour-toolbox: var(--black);
+  --colour-toolboxText: var(--black);
+  --colour-toolboxHover: var(--black);
+  --colour-toolboxSelected: var(--black);
+  --text-prominent: #ffffff;
+  /* Brand Colors for Icons */
+  --brand-red: #ff444f;
+  --brand-green: #4bb4b3;
+  --brand-teal: #89A9AD;
+  --brand-cyan: #3fc6cf;
+  --barrier-grey: #a0a6aa;
+  --broken-grey: #6A7178;
+}
+
+/* Dropdown Menu Styles - Force black text on light background */
+.blocklyDropDownDiv,
+.blocklyDropDownDiv *,
+.blocklyDropDownDiv .goog-menu,
+.blocklyDropDownDiv .goog-menuitem,
+.blocklyDropDownDiv .goog-menuitem-content,
+.blocklyDropDownDiv .blocklyMenuItemContent,
+.blocklyDropDownDiv .goog-menuitem-accel,
+.blocklyDropDownDiv .blocklyMenuItemContent *,
+.blocklyMenuItemContent,
+.blocklyMenuItemContent *,
+.goog-menuitem,
+.goog-menuitem-content,
+.goog-menuitem-accel {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+    fill: #000000 !important;
+}
+
+.blocklyDropDownDiv .goog-menuitem:hover,
+.blocklyDropDownDiv .goog-menuitem-highlight,
+.goog-menuitem-highlight,
+.goog-menuitem-hover {
+    background-color: #eeeeee !important;
+}
+
+/* Checkmarks in dropdowns should be black */
+.blocklyCheckmark {
+    stroke: #000000 !important;
+}
+
+.theme--dark {
+    .zelos-renderer.zelos_renderer-theme .blocklyMainBackground,
+    .load-strategy__container .blocklyMainBackground {
+        fill: #000000 !important;
+    }
+
+    .blocklyPath[fill='#fff'],
+    .blocklyPath[fill='#ffffff'],
+    .blocklyVariableGet .blocklyPath,
+    .blocklyOutlinePath {
+        fill: #ffffff !important;
+    }
+
+    /* Fields should be white rounded pills */
+    .zelos-renderer.zelos_renderer-theme rect.blocklyFieldRect.blocklyDropdownRect,
+    .zelos-renderer.zelos_renderer-theme .blocklyNonEditableText > rect:not(.blocklyDropdownRect),
+    .zelos-renderer.zelos_renderer-theme .blocklyEditableText > rect:not(.blocklyDropdownRect),
+    .flyout rect.blocklyFieldRect.blocklyDropdownRect,
+    .flyout .blocklyNonEditableText > rect:not(.blocklyDropdownRect),
+    .flyout .blocklyEditableText > rect:not(.blocklyDropdownRect) {
+        fill: #ffffff !important;
+        rx: 12px !important;
+        ry: 12px !important;
+    }
+
+    /* Default blockly text should be white (for dark blocks) */
+    .blocklyText {
+        fill: #ffffff;
+    }
+
+    /* Text on white blocks should be black */
+    .zelos-renderer .blocklyPath[fill='#ffffff'] ~ g .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#ffffff'] ~ .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#fff'] ~ g .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#fff'] ~ .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#d2d2d2'] ~ g .blocklyText,
+    .zelos-renderer .blocklyPath[fill='#d2d2d2'] ~ .blocklyText,
+    .flyout .blocklyPath[fill='#ffffff'] ~ g .blocklyText,
+    .flyout .blocklyPath[fill='#ffffff'] ~ .blocklyText,
+    .flyout .blocklyPath[fill='#fff'] ~ g .blocklyText,
+    .flyout .blocklyPath[fill='#fff'] ~ .blocklyText,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g .blocklyText,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ .blocklyText,
+    .flyout .blocklyPath[fill='#d2d2d2'] ~ g .blocklyText,
+    .flyout .blocklyPath[fill='#d2d2d2'] ~ .blocklyText {
+        fill: #000000 !important;
+    }
+
+    /* Default field text should be white (for dark fields) */
+    .zelos-renderer.zelos_renderer-theme .blocklyNonEditableText text,
+    .zelos-renderer.zelos_renderer-theme .blocklyEditableText text,
+    .zelos-renderer.zelos_renderer-theme .blocklyFieldRect + text,
+    .zelos-renderer.zelos_renderer-theme .blocklyDropdownText {
+        fill: #ffffff !important;
+    }
+
+    /* Force black field text ONLY on blocks that have white fields (like the default behavior) */
+    /* However, we are moving towards dark fields on light blocks. */
+
+    /* Fields on light blocks should be dark with white text */
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyEditableText rect,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyNonEditableText rect,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyFieldRect rect,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g rect.blocklyDropdownRect,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ .blocklyFieldRect rect,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g .blocklyEditableText rect,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g .blocklyNonEditableText rect,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g rect.blocklyDropdownRect {
+        fill: #1a1a1a !important;
+    }
+
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyEditableText text,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyNonEditableText text,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyFieldRect text,
+    .zelos-renderer .blocklyPath[fill='#eeeeee'] ~ g .blocklyDropdownText,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g .blocklyEditableText text,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g .blocklyNonEditableText text,
+    .flyout .blocklyPath[fill='#eeeeee'] ~ g .blocklyDropdownText {
+        fill: #ffffff !important;
+    }
+
+    /* Target specific classes used by Blockly for numbers and editable text with theme parent */
+    .zelos-renderer.zelos_renderer-theme .blocklyText.blocklyEditableText,
+    .zelos-renderer.zelos_renderer-theme .blocklyText.blocklyNonEditableText,
+    .zelos-renderer.zelos_renderer-theme .blocklyEditableText .blocklyText,
+    .zelos-renderer.zelos_renderer-theme .blocklyNonEditableText .blocklyText {
+        fill: #000000 !important;
+    }
+
+    .flyout .zelos-renderer.classic-theme .blocklyMainBackground {
+        fill: #151816 !important;
+    }
+
+    .zelos-renderer.zelos_renderer-theme .blocklyEditableText > image,
+    .zelos-renderer.zelos_renderer-theme .blocklyNonEditableText > image {
+        filter: invert(1);
+    }
+
+    .flyout .zelos-renderer.classic-theme .blocklyEditableText > image {
+        filter: invert(0);
+    }
+
+    .zelos-renderer.classic-theme .blocklyNonEditableText > rect:not(.blocklyDropdownRect),
+    .zelos-renderer.classic-theme .blocklyEditableText > rect:not(.blocklyDropdownRect) {
+        fill: unset;
+    }
+}
+
+.flyout .injectionDiv {
+    height: 100%;
+}
+
+.flyout .zelos-renderer.classic-theme .blocklyMainBackground {
+    filter: unset;
+}
+
+.zelos-renderer.zelos_renderer-theme,
+.flyout .zelos-renderer.classic-theme,
+.gtm-search-results,
+.load-strategy__container {
+    @keyframes blink-effect {
+        0% {
+            stroke: #f00;
+            stroke-width: 5px;
+        }
+
+        50% {
+            stroke: #ff0;
+            stroke-width: 8px;
+        }
+
+        100% {
+            stroke: #f00;
+            stroke-width: 5px;
+        }
+    }
+
+    .block--error-highlighted > .blocklyPath {
+        stroke: #f00;
+        stroke-width: 5px;
+    }
+
+    @keyframes fade-in-out {
+        0% {
+            stroke-opacity: 0;
+        }
+
+        50% {
+            stroke-opacity: 1;
+            stroke-width: 6px;
+        }
+
+        100% {
+            stroke-opacity: 0;
+        }
+    }
+
+    .block--execution-highlighted > .blocklyPath {
+        stroke: #89b2af;
+        animation: fade-in-out 1.5s;
+    }
+
+    .block--blink > .blocklyPath {
+        animation: blink-effect 1s infinite;
+    }
+
+    .blocklySvg {
+        outline: none;
+        overflow: hidden; /* IE overflows by default. */
+        position: absolute;
+        display: block;
+    }
+
+    /* Necessary to position the drag surface */
+    .blocklyRelativeWrapper {
+        position: relative;
+        width: 100%;
+        height: 100%;
+    }
+
+    .blocklyWidgetDiv {
+        display: none;
+        position: absolute;
+        z-index: 99999; /* big value for bootstrap3 compatibility */
+    }
+
+    .blocklyNonSelectable {
+        user-select: none;
+    }
+
+    .blocklyWidgetDiv.fieldTextInput {
+        overflow: hidden;
+        border: 1px solid;
+        box-sizing: border-box;
+        transform-origin: 0 0;
+    }
+
+    .blocklyWidgetDiv.fieldTextInput.removableTextInput {
+        overflow: visible;
+    }
+
+    .blocklyTextDropDownArrow {
+        position: absolute;
+    }
+
+    .blocklyTextRemoveIcon {
+        position: absolute;
+        width: 24px;
+        height: 24px;
+        top: -40px;
+        left: 50%;
+        margin-left: -12px;
+        cursor: pointer;
+    }
+
+    .blocklyWsDragSurface {
+        display: none;
+        position: absolute;
+        top: 0;
+        left: 0;
+    }
+
+    .blocklyWsDragSurface.blocklyOverflowVisible {
+        overflow: visible;
+    }
+
+    .blocklyTooltipDiv {
+        min-height: 34px;
+        background-color: #d6dadb;
+        border-radius: 4px;
+        color: #333;
+        padding: 8px;
+        font-size: 12px;
+        font-family: 'Inter', sans-serif;
+        line-height: 1.5;
+        letter-spacing: normal;
+        position: absolute;
+        z-index: 100000;
+    }
+
+    .blocklyDropDownDiv {
+        position: fixed;
+        left: 0;
+        top: 0;
+        z-index: 1000;
+        display: none;
+        border: 1px solid;
+        border-radius: 4px;
+        box-shadow: 0 0 8px 1px rgb(0 0 0 / 30%);
+        padding: 4px;
+        user-select: none;
+        min-height: 15px;
+    }
+
+    .blocklyDropDownContent {
+        max-height: 300px;
+        overflow: auto;
+    }
+
+    .blocklyDropDownArrow {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 16px;
+        height: 16px;
+        z-index: -1;
+        background-color: inherit;
+        border-color: inherit;
+    }
+
+    .blocklyDropDownButton {
+        display: inline-block;
+        float: left;
+        padding: 0;
+        margin: 4px;
+        border-radius: 4px;
+        outline: none;
+        border: 1px solid;
+        transition: box-shadow 0.1s;
+        cursor: pointer;
+    }
+
+    .blocklyDropDownButtonHover {
+        box-shadow: 0 0 0 4px rgb(0 0 0 / 10%);
+    }
+
+    .blocklyDropDownButton:active {
+        box-shadow: 0 0 0 6px rgb(0 0 0 / 10%);
+    }
+
+    .blocklyDropDownButton > img {
+        width: 80%;
+        height: 80%;
+        margin-top: 5%;
+    }
+
+    .blocklyDropDownPlaceholder {
+        display: inline-block;
+        float: left;
+        padding: 0;
+        margin: 4px;
+    }
+
+    .blocklyNumPadButton {
+        display: inline-block;
+        float: left;
+        padding: 0;
+        width: 48px;
+        height: 48px;
+        margin: 4px;
+        border-radius: 4px;
+        background: var(--colour-numPadBackground);
+        color: #333;
+        outline: none;
+        border: 1px solid var(--colour-numPadBorder);
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 12px;
+        -webkit-tap-highlight-color: rgb(0 0 0 / 0%);
+    }
+
+    .blocklyNumPadButton > img {
+        margin-top: 10%;
+        width: 80%;
+        height: 80%;
+        filter: invert(1);
+    }
+
+    .blocklyNumPadButton:active {
+        background: var(--colour-numPadActiveBackground);
+        -webkit-tap-highlight-color: rgb(0 0 0 / 0%);
+    }
+
+    .arrowTop {
+        border-top: 1px solid;
+        border-left: 1px solid;
+        border-top-left-radius: 4px;
+        border-color: inherit;
+    }
+
+    .arrowBottom {
+        border-bottom: 1px solid;
+        border-right: 1px solid;
+        border-bottom-right-radius: 4px;
+        border-color: inherit;
+    }
+
+    .valueReportBox {
+        min-width: 50px;
+        max-width: 300px;
+        max-height: 200px;
+        overflow: auto;
+        word-wrap: break-word;
+        text-align: center;
+        font-size: 0.8em;
+    }
+
+    .blocklyResizeSE {
+        cursor: se-resize;
+        fill: #aaa;
+    }
+
+    .blocklyResizeSW {
+        cursor: sw-resize;
+        fill: #aaa;
+    }
+
+    .blocklyResizeLine {
+        stroke: #888;
+        stroke-width: 1;
+    }
+
+    .blocklyHighlightedConnectionPath {
+        fill: none;
+        stroke: #fc3;
+        stroke-width: 4px;
+    }
+
+    .blocklyPath {
+        stroke-width: 0.4px;
+    }
+
+    .blocklySelected > .blocklyPath {
+        stroke: #ffc358;
+        stroke-width: 3px;
+    }
+
+    .blocklySelected > .blocklyPathLight {
+        display: none;
+    }
+
+    .blocklyDraggable {
+        cursor: grab;
+
+        image[alt='Collapsed'] {
+            transform: translate(7px);
+        }
+    }
+
+    .blocklyDragging {
+        cursor: grabbing;
+    }
+
+    .blocklyDraggable:active,
+    .blocklyBlockDragSurface .blocklyDraggable {
+        cursor: grabbing;
+    }
+
+    .blocklyDragging.blocklyDraggingMouseThrough {
+        pointer-events: none;
+    }
+
+    .blocklyToolboxGrab {
+        cursor: grabbing;
+    }
+
+    .blocklyDragging > .blocklyPath,
+    .blocklyDragging > .blocklyPathLight {
+        fill-opacity: 1;
+        stroke-opacity: 1;
+    }
+
+    .blocklyDisabled > .blocklyPath {
+        fill-opacity: 0.5;
+        stroke-opacity: 0.5;
+    }
+
+    .blocklyInsertionMarker > .blocklyPath {
+        stroke: none;
+    }
+
+    .blocklyText {
+        fill: #ffffff;
+        font-family: inherit;
+        font-size: 1.63rem;
+        font-weight: normal;
+        font-stretch: normal;
+        font-style: normal;
+        line-height: 1.5;
+        letter-spacing: normal;
+    }
+
+    .blocklyTextTruncated {
+        font-size: 11px;
+    }
+
+    .blocklyNonEditableText > text {
+        pointer-events: none;
+    }
+
+    .blocklyNonEditableText text,
+    .blocklyEditableText text {
+        fill: #000000;
+    }
+
+    .blocklyEditableText > .blocklyEditableLabel {
+        fill: #000000;
+    }
+
+    .blocklyNonEditableText > image,
+    .blocklyEditableText > image {
+        filter: unset;
+    }
+
+    .blocklyDropdownText {
+        fill: #000000 !important;
+        font-size: 1.6rem;
+    }
+
+    .blocklyBubbleText {
+        fill: var(--colour-text);
+    }
+
+    .blocklyFlyout {
+        position: absolute;
+        z-index: 20;
+    }
+
+    .blocklyFlyoutButton {
+        fill: none;
+        pointer-events: all;
+    }
+
+    .blocklyFlyoutButtonBackground {
+        stroke: #c6c6c6;
+    }
+
+    .blocklyFlyoutButton .blocklyText {
+        fill: var(--colour-text);
+    }
+
+    .blocklyFlyoutButtonShadow {
+        fill: transparent;
+    }
+
+    .blocklyFlyoutButton:hover {
+        fill: #fff;
+        cursor: pointer;
+    }
+
+    .blocklyFlyoutLabel {
+        cursor: default;
+    }
+
+    .blocklyFlyoutLabelBackground {
+        opacity: 0;
+    }
+
+    .blocklyFlyoutLabelText {
+        font-size: 14px;
+        fill: #575e75;
+        font-weight: bold;
+    }
+
+    .blocklySvg text,
+    .blocklyBlockDragSurface text,
+    .blocklyFlyout text,
+    .blocklyToolboxDiv text {
+        user-select: none;
+        cursor: inherit;
+    }
+
+    .blocklyHidden {
+        display: none;
+    }
+
+    .blocklyFieldDropdown:not(.blocklyHidden) {
+        display: block;
+    }
+
+    .blocklyIconGroup {
+        cursor: default;
+    }
+
+    .blocklyIconGroup:not(:hover),
+    .blocklyIconGroupReadonly {
+        opacity: 0.6;
+    }
+
+    .blocklyIconShape {
+        fill: #00f;
+        stroke: #fff;
+        stroke-width: 1px;
+    }
+
+    .blocklyIconSymbol {
+        fill: #fff;
+    }
+
+    .blocklyMinimalBody {
+        margin: 0;
+        padding: 0;
+    }
+
+    .blocklyCommentForeignObject {
+        position: relative;
+        z-index: 0;
+    }
+
+    .blocklyCommentRect {
+        fill: #e7de8e;
+        stroke: #bca903;
+        stroke-width: 1px;
+    }
+
+    .blocklyCommentTarget {
+        fill: transparent;
+        stroke: #bca903;
+    }
+
+    .blocklyCommentTargetFocused {
+        fill: none;
+    }
+
+    .blocklyCommentHandleTarget {
+        fill: none;
+    }
+
+    .blocklyCommentHandleTargetFocused {
+        fill: transparent;
+    }
+
+    .blocklyFocused > .blocklyCommentRect {
+        fill: #b9b272;
+        stroke: #b9b272;
+    }
+
+    .blocklySelected > .blocklyCommentTarget {
+        stroke: #fc3;
+        stroke-width: 3px;
+    }
+
+    .blocklyCommentTextarea {
+        background-color: #fef49c;
+        border: 0;
+        outline: 0;
+        margin: 0;
+        padding: 3px;
+        resize: none;
+        display: block;
+        overflow: hidden;
+    }
+
+    .blocklyCommentDeleteIcon {
+        cursor: pointer;
+        fill: #000;
+        display: none;
+    }
+
+    .blocklySelected > .blocklyCommentDeleteIcon {
+        display: block;
+    }
+
+    .blocklyDeleteIconShape {
+        fill: #000;
+        stroke: #000;
+        stroke-width: 1px;
+    }
+
+    .blocklyDeleteIconShape.blocklyDeleteIconHighlighted {
+        stroke: #fc3;
+    }
+
+    .scratchCommentForeignObject {
+        position: relative;
+    }
+
+    .scratchCommentBody {
+        background-color: #fef49c;
+        border-radius: 4px;
+    }
+
+    .scratchCommentRect {
+        fill: #fef49c;
+    }
+
+    .scratchCommentTarget {
+        fill: transparent;
+    }
+
+    .scratchWorkspaceCommentBorder {
+        stroke: #bca903;
+        stroke-width: 1px;
+    }
+
+    .scratchCommentTargetFocused {
+        fill: none;
+    }
+
+    .scratchCommentTopBar {
+        fill: #000;
+        fill-opacity: 0.1;
+    }
+
+    .scratchCommentText {
+        font-size: 12px;
+        font-weight: 400;
+    }
+
+    .scratchCommentTextarea {
+        background-color: #fef49c;
+        border: 0;
+        outline: 0;
+        padding: 0;
+        resize: none;
+        overflow: hidden;
+    }
+
+    .scratchCommentResizeSE {
+        cursor: se-resize;
+        fill: transparent;
+    }
+
+    .scratchCommentResizeSW {
+        cursor: sw-resize;
+        fill: transparent;
+    }
+
+    .blocklyHtmlInput {
+        border: none;
+        font-size: 12px;
+        height: 100%;
+        margin: 0;
+        outline: none;
+        box-sizing: border-box;
+        width: 100%;
+        text-align: center;
+        font-weight: 500;
+    }
+
+    .blocklyMainBackground {
+        stroke-width: 0;
+        fill: #fff;
+    }
+
+    .blocklyMutatorBackground {
+        fill: #fff;
+        stroke: #fff;
+        stroke-width: 1;
+    }
+
+    .blocklyFlyoutBackground {
+        fill: var(--colour-flyout);
+        fill-opacity: 0.8;
+    }
+
+    .blocklyMainWorkspaceScrollbar {
+        z-index: 20;
+    }
+
+    .blocklyFlyoutScrollbar {
+        z-index: 30;
+    }
+
+    .blocklyScrollbarHorizontal,
+    .blocklyScrollbarVertical {
+        position: absolute;
+        outline: none;
+    }
+
+    .blocklyScrollbarBackground {
+        opacity: 0;
+    }
+
+    .blocklyScrollbarHandle {
+        fill: var(--colour-scrollbar);
+    }
+
+    .blocklyScrollbarBackground:hover + .blocklyScrollbarHandle,
+    .blocklyScrollbarHandle:hover {
+        fill: var(--colour-scrollbarHover);
+    }
+
+    .blocklyZoom > image {
+        opacity: 1;
+    }
+
+    .blocklyFlyout .blocklyScrollbarHandle {
+        fill: #bbb;
+    }
+
+    .blocklyFlyout .blocklyScrollbarBackground:hover + .blocklyScrollbarHandle,
+    .blocklyFlyout .blocklyScrollbarHandle:hover {
+        fill: #aaa;
+    }
+
+    .blocklyInvalidInput {
+        background: #faa;
+    }
+
+    .blocklyAngleCircle {
+        stroke: #3373cc;
+        stroke-width: 1;
+        fill: #4280d7;
+    }
+
+    .blocklyAngleCenterPoint {
+        stroke: #fff;
+        stroke-width: 1;
+        fill: #fff;
+    }
+
+    .blocklyAngleDragHandle {
+        stroke: #fff;
+        stroke-width: 5;
+        stroke-opacity: 0.25;
+        fill: #fff;
+        cursor: pointer;
+    }
+
+    .blocklyAngleDragArrow {
+        pointer-events: none;
+    }
+
+    .blocklyAngleMarks {
+        stroke: #fff;
+        stroke-width: 1;
+        stroke-opacity: 0.5;
+    }
+
+    .blocklyAngleGauge {
+        fill: #fff;
+        fill-opacity: 0.2;
+    }
+
+    .blocklyAngleLine {
+        stroke: #fff;
+        stroke-width: 1;
+        stroke-linecap: round;
+        pointer-events: none;
+    }
+
+    .blocklyContextMenu {
+        border-radius: 4px;
+        max-height: 100%;
+        min-width: 20rem;
+    }
+
+    .blocklyDropdownMenu {
+        padding: 0 !important;
+    }
+
+    .blocklyDropDownNumPad {
+        background-color: var(--colour-numPadBackground);
+    }
+
+    /* Category tree in Toolbox. */
+    .blocklyToolboxDiv {
+        background-color: var(--colour-toolbox);
+        color: var(--colour-toolboxText);
+        overflow-x: visible;
+        overflow-y: auto;
+        position: absolute;
+        z-index: 40; /* so blocks go over toolbox when dragging */
+        -webkit-tap-highlight-color: transparent; /* issue #1345 */
+    }
+
+    .blocklyTreeRoot {
+        padding: 4px 0;
+    }
+
+    .blocklyTreeRoot:focus {
+        outline: none;
+    }
+
+    .blocklyTreeRow {
+        height: 22px;
+        line-height: 22px;
+        margin-bottom: 3px;
+        padding-right: 8px;
+        white-space: nowrap;
+    }
+
+    .blocklyHorizontalTree {
+        float: left;
+        margin: 1px 5px 8px 0;
+    }
+
+    .blocklyHorizontalTreeRtl {
+        float: right;
+        margin: 1px 0 8px 5px;
+    }
+
+    .blocklyToolboxDiv[dir='RTL'] .blocklyTreeRow {
+        margin-left: 8px;
+    }
+
+    .blocklyTreeRow:not(.blocklyTreeSelected):hover {
+        background-color: #e4e4e4;
+    }
+
+    .blocklyTreeSeparator {
+        border-bottom: solid #e5e5e5 1px;
+        height: 0;
+        margin: 5px 0;
+    }
+
+    .blocklyTreeSeparatorHorizontal {
+        border-right: solid #e5e5e5 1px;
+        width: 0;
+        padding: 5px 0;
+        margin: 0 5px;
+    }
+
+    .blocklyTreeIcon {
+        height: 16px;
+        vertical-align: middle;
+        width: 16px;
+    }
+
+    .blocklyTreeIconClosedLtr {
+        background-position: -32px -1px;
+    }
+
+    .blocklyTreeIconClosedRtl {
+        background-position: 0 -1px;
+    }
+
+    .blocklyTreeIconOpen {
+        background-position: -16px -1px;
+    }
+
+    .blocklyTreeSelected > .blocklyTreeIconClosedLtr {
+        background-position: -32px -17px;
+    }
+
+    .blocklyTreeSelected > .blocklyTreeIconClosedRtl {
+        background-position: 0 -17px;
+    }
+
+    .blocklyTreeSelected > .blocklyTreeIconOpen {
+        background-position: -16px -17px;
+    }
+
+    .blocklyTreeIconNone,
+    .blocklyTreeSelected > .blocklyTreeIconNone {
+        background-position: -48px -1px;
+    }
+
+    .blocklyTreeLabel {
+        cursor: default;
+        font-size: 16px;
+        padding: 0 3px;
+        vertical-align: middle;
+    }
+
+    .blocklyTreeSelected .blocklyTreeLabel {
+        color: #fff;
+    }
+
+    .blocklyDropDownDiv .goog-slider-horizontal {
+        margin: 8px;
+        height: 22px;
+        width: 150px;
+        position: relative;
+        outline: none;
+        border-radius: 11px;
+        margin-bottom: 20px;
+    }
+
+    .blocklyDropDownDiv .goog-slider-horizontal .goog-slider-thumb {
+        width: 26px;
+        height: 26px;
+        top: -1px;
+        position: absolute;
+        background-color: #fff;
+        border-radius: 100%;
+        box-shadow: 0 0 0 4px rgb(0 0 0 / 15%);
+    }
+
+    .scratchEyedropper {
+        background: none;
+        outline: none;
+        border: none;
+        width: 100%;
+        text-align: center;
+        border-top: 1px solid #ddd;
+        padding-top: 5px;
+        cursor: pointer;
+    }
+
+    .scratchColourPickerLabel {
+        font-size: 0.65rem;
+        color: var(--colour-toolboxText);
+        margin: 8px;
+    }
+
+    .scratchColourPickerLabelText {
+        font-weight: bold;
+    }
+
+    .scratchColourPickerReadout {
+        margin-left: 10px;
+    }
+
+    .scratchMatrixButtonDiv {
+        width: 50%;
+        text-align: center;
+        float: left;
+    }
+
+    .scratchNotePickerKeyLabel {
+        font-size: 0.75rem;
+        fill: var(--colour-text);
+        pointer-events: none;
+    }
+
+    .blocklyWidgetDiv .goog-menu {
+        background: #fff;
+        border-color: #ccc #666 #666 #ccc;
+        border-style: solid;
+        border-width: 1px;
+        cursor: default;
+        font:
+            normal 13px 'Helvetica Neue',
+            sans-serif;
+        margin: 0;
+        outline: none;
+        padding: 4px 0;
+        position: absolute;
+        overflow-y: auto;
+        overflow-x: hidden;
+        z-index: 20000;
+    }
+
+    .blocklyDropDownDiv .goog-menu {
+        cursor: default;
+        font:
+            normal 13px 'Helvetica Neue',
+            sans-serif;
+        outline: none;
+        z-index: 20000;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem {
+        color: #000;
+        font:
+            normal 13px 'Helvetica Neue',
+            sans-serif;
+        list-style: none;
+        margin: 0;
+        padding: 4px 7em 4px 28px;
+        white-space: nowrap;
+    }
+
+    .blocklyDropDownDiv .goog-menuitem {
+        color: #333;
+        font:
+            normal 13px 'Helvetica Neue',
+            sans-serif;
+        font-weight: bold;
+        list-style: none;
+        margin: 0;
+        min-height: 24px;
+        padding: 4px 7em 4px 28px;
+        white-space: nowrap;
+    }
+
+    .blocklyWidgetDiv .goog-menu-nocheckbox .goog-menuitem,
+    .blocklyWidgetDiv .goog-menu-noicon .goog-menuitem,
+    .blocklyDropDownDiv .goog-menu-nocheckbox .goog-menuitem,
+    .blocklyDropDownDiv .goog-menu-noicon .goog-menuitem {
+        padding-left: 12px;
+    }
+
+    .blocklyWidgetDiv .goog-menu-noaccel .goog-menuitem,
+    .blocklyDropDownDiv .goog-menu-noaccel .goog-menuitem {
+        padding-right: 20px;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-content,
+    .blocklyDropDownDiv .goog-menuitem-content {
+        color: #000;
+        font:
+            normal 13px 'Helvetica Neue',
+            sans-serif;
+    }
+
+    .blocklyMenuItemContent.goog-menuitem-content {
+        color: #000;
+    }
+
+    .blocklyDropDownContent .blocklyMenuItemContent.goog-menuitem-content {
+        font-weight: bold;
+    }
+
+    .blocklyCheckbox {
+        width: 16px;
+        height: 16px;
+        y: 7;
+        x: 2;
+        fill: #000 !important;
+        stroke: #fff !important;
+        rx: 4px !important;
+        ry: 4px !important;
+    }
+
+    .header__title {
+        color: var(--text-prominent);
+        display: inline-block;
+        font-weight: 700;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-disabled .goog-menuitem-accel,
+    .blocklyWidgetDiv .goog-menuitem-disabled .goog-menuitem-content,
+    .blocklyDropDownDiv .goog-menuitem-disabled .goog-menuitem-accel,
+    .blocklyDropDownDiv .goog-menuitem-disabled .goog-menuitem-content {
+        color: #ccc !important;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-disabled .goog-menuitem-icon,
+    .blocklyDropDownDiv .goog-menuitem-disabled .goog-menuitem-icon {
+        opacity: 0.3;
+        -moz-opacity: 0.3;
+        filter: alpha(opacity=30);
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-highlight,
+    .blocklyWidgetDiv .goog-menuitem-hover {
+        background-color: #d6e9f8;
+        border-color: #d6e9f8;
+        border-style: dotted;
+        border-width: 1px 0;
+        padding-bottom: 3px;
+        padding-top: 3px;
+    }
+
+    .blocklyDropDownDiv .goog-menuitem-highlight,
+    .blocklyDropDownDiv .goog-menuitem-hover {
+        background-color: rgb(0 0 0 / 20%);
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-checkbox,
+    .blocklyWidgetDiv .goog-menuitem-icon,
+    .blocklyDropDownDiv .goog-menuitem-checkbox,
+    .blocklyDropDownDiv .goog-menuitem-icon {
+        background-repeat: no-repeat;
+        height: 16px;
+        left: 6px;
+        position: absolute;
+        right: auto;
+        vertical-align: middle;
+        width: 16px;
+    }
+
+    .blocklyWidgetDiv .goog-option-selected .goog-menuitem-checkbox,
+    .blocklyWidgetDiv .goog-option-selected .goog-menuitem-icon,
+    .blocklyDropDownDiv .goog-option-selected .goog-menuitem-checkbox,
+    .blocklyDropDownDiv .goog-option-selected .goog-menuitem-icon {
+        position: static;
+        float: left;
+        margin-left: -24px;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-rtl .goog-menuitem-checkbox,
+    .blocklyWidgetDiv .goog-menuitem-rtl .goog-menuitem-icon,
+    .blocklyDropDownDiv .goog-menuitem-rtl .goog-menuitem-checkbox,
+    .blocklyDropDownDiv .goog-menuitem-rtl .goog-menuitem-icon {
+        float: right;
+        margin-right: -24px;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-accel,
+    .blocklyDropDownDiv .goog-menuitem-accel {
+        color: #999;
+        direction: ltr;
+        left: auto;
+        padding: 0 6px;
+        position: absolute;
+        right: 0;
+        text-align: right;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-rtl .goog-menuitem-accel,
+    .blocklyDropDownDiv .goog-menuitem-rtl .goog-menuitem-accel {
+        left: 0;
+        right: auto;
+        text-align: left;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-mnemonic-hint,
+    .blocklyDropDownDiv .goog-menuitem-mnemonic-hint {
+        text-decoration: underline;
+    }
+
+    .blocklyWidgetDiv .goog-menuitem-mnemonic-separator,
+    .blocklyDropDownDiv .goog-menuitem-mnemonic-separator {
+        color: #999;
+        font-size: 12px;
+        padding-left: 4px;
+    }
+
+    .blocklyWidgetDiv .goog-menuseparator,
+    .blocklyDropDownDiv .goog-menuseparator {
+        border-top: 1px solid #ccc;
+        margin: 4px 0;
+        padding: 0;
+    }
+
+    .blocklyFlyoutCheckbox {
+        fill: #000;
+        stroke: #fff;
+        rx: 4px;
+        ry: 4px;
+    }
+
+    .blocklyFlyoutCheckbox.checked {
+        fill: #000;
+        stroke: #fff;
+        rx: 4px;
+        ry: 4px;
+    }
+
+    .blocklyFlyoutCheckboxPath {
+        stroke: #fff;
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+    }
+
+    .scratchCategoryMenu {
+        width: 60px;
+        background: var(--colour-toolbox);
+        color: var(--colour-toolboxText);
+        font-size: 0.7rem;
+        user-select: none;
+    }
+
+    .scratchCategoryMenuHorizontal {
+        width: 100%;
+        height: 50px;
+        background: var(--colour-toolbox);
+        color: var(--colour-toolboxText);
+        font-size: 0.7em;
+        user-select: none;
+    }
+
+    .scratchCategoryMenuHorizontal .scratchCategoryMenuRow {
+        float: left;
+        margin: 3px;
+    }
+
+    .scratchCategoryMenuItem {
+        padding: 0.375rem 0;
+        cursor: pointer;
+        text-align: center;
+    }
+
+    .scratchCategoryMenuHorizontal .scratchCategoryMenuItem {
+        padding: 6px 5px;
+    }
+
+    .scratchCategoryMenuItem.categorySelected {
+        background: var(--colour-toolboxSelected);
+    }
+
+    .scratchCategoryItemBubble {
+        width: 1.25rem;
+        height: 1.25rem;
+        border: 1px solid;
+        border-radius: 100%;
+        margin: 0 auto 0.125rem;
+    }
+
+    .scratchCategoryItemIcon {
+        width: 1.25rem;
+        height: 1.25rem;
+        margin: 0 auto 0.125rem;
+        background-size: 100%;
+    }
+
+    .scratchCategoryMenuItem:hover {
+        color: var(--colour-toolboxHover) !important;
+    }
+
+    rect.blocklyFieldRect.blocklyDropdownRect {
+        fill: #fff;
+        rx: 16px;
+        ry: 16px;
+    }
+
+    .blocklyTextRootBlockHeader,
+    .blocklyTextRootBlockHeaderCollapsed {
+        width: 17rem !important;
+        color: #fff;
+        fill: #fff;
+        font-size: 1.9rem;
+    }
+
+    .blocklyTextRootBlockHeaderCollapsed {
+        font-size: 1.8rem;
+    }
+
+    .blocklyTextTickAnalysis {
+        fill: #fff;
+        font-size: 1.6rem;
+    }
+}
+
+.blocklyNonEditableText:has(> .blocklyCheckbox) .blocklyFieldRect,
+.blocklyEditableText:has(> .blocklyCheckbox) .blocklyFieldRect {
+    width: 16px;
+    height: 16px;
+    y: 7;
+    x: 2;
+    fill: #000 !important;
+    stroke: #fff !important;
+    rx: 4px !important;
+    ry: 4px !important;
+}
+
+g.editing .blocklyEditableText {
+    display: none !important;
+}
+
+/* Hide scrollbars globally */
+::-webkit-scrollbar {
+  display: none;
+}
+
+* {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+/* Blockly specific scrollbars */
+.blocklyScrollbarHandle,
+.blocklyScrollbarBackground {
+  display: none !important;
+}
+
+/* Hide native Blockly toolbox to use custom sidebar */
+.blocklyToolboxDiv,
+.blocklyTreeRoot,
+.blocklyToolboxCategory,
+.blocklyTreeRow,
+.blocklyToolboxContents {
+    display: none !important;
+    visibility: hidden !important;
+    width: 0 !important;
+    height: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    position: absolute !important;
+    left: -9999px !important;
+}
+
+/* Ensure flyout is visible and correctly positioned next to custom sidebar */
+.blocklyFlyout {
+    z-index: 70 !important;
+    display: block !important;
+    visibility: visible !important;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease-in-out !important;
+    transform: translateX(-100%) !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+
+.flyout-open .blocklyFlyout {
+    transform: translateX(0) !important;
+    opacity: 1 !important;
+    pointer-events: all !important;
+}
+
+@media (max-width: 1023px) {
+    .blocklyFlyout {
+        /* On mobile, the sidebar is fixed and 64px wide */
+        transform: translateX(-100%) !important;
+    }
+    
+    .flyout-open .blocklyFlyout {
+        transform: translateX(64px) !important;
+    }
+}
+
+/* Hide Blockly controls on mobile */
+@media (max-width: 1023px) {
+    .blocklyZoom, 
+    .blocklyTrash,
+    .blocklyBubbleCanvas,
+    .blocklyMainWorkspaceScrollbar {
+        display: none !important;
+    }
+}
+
+/* --- Contract Icons --- */
+:root {
+  --icon-red: #ff444f;
+  --icon-teal: #00a79e;
+  --icon-size: 26px;
+}
+
+.stroke-red { stroke: var(--brand-red); stroke-width: 5; fill: none; }
+.stroke-red-thick { stroke: var(--brand-red); stroke-width: 6.5; fill: none; }
+.stroke-green { stroke: var(--brand-green); stroke-width: 5; fill: none; }
+.stroke-barrier { stroke: #e0e0e0; stroke-width: 4.5; fill: none; }
+.stroke-grey-thick { stroke: #e0e0e0; stroke-width: 6.5; fill: none; }
+.stroke-broken { stroke: var(--broken-grey); stroke-width: 6; fill: none; }
+
+.contract-icon-box {
+  position: relative;
+  width: var(--icon-size, 24px);
+  height: var(--icon-size, 24px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Ensure Tailwind classes can override the size */
+.contract-icon-box.w-4 { width: 1rem; height: 1rem; --icon-size: 1rem; }
+.contract-icon-box.w-5 { width: 1.25rem; height: 1.25rem; --icon-size: 1.25rem; }
+.contract-icon-box.w-6 { width: 1.5rem; height: 1.5rem; --icon-size: 1.5rem; }
+.contract-icon-box.w-8 { width: 2rem; height: 2rem; --icon-size: 2rem; }
+
+/* --- 1. FALL --- */
+.contract-icon-box .fall {
+  width: 2px;
+  height: 12px;
+  background: var(--icon-red);
+  transform: rotate(45deg);
+  position: relative;
+}
+.contract-icon-box .fall::after {
+  content: '';
+  position: absolute;
+  bottom: -1px; right: -3px;
+  width: 5px; height: 5px;
+  border-right: 2px solid var(--icon-red);
+  border-bottom: 2px solid var(--icon-red);
+}
+.contract-icon-box .fall::before {
+  content: '';
+  position: absolute;
+  top: -2px; left: -1px;
+  width: 3px; height: 2px;
+  background: var(--icon-teal);
+}
+
+/* --- 2. ACCU --- */
+.contract-icon-box .accu {
+  width: 16px;
+  height: 12px;
+  border-top: 3px solid #99c2c2;
+  border-bottom: 3px solid #99c2c2;
+  position: relative;
+}
+.contract-icon-box .accu::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 0;
+  width: 100%; height: 6px;
+  transform: translateY(-50%);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 10' preserveAspectRatio='none'%3E%3Cpath d='M0 5 L4 5 L7 9 L10 1 L13 9 L16 5 L20 5' fill='none' stroke='%23ff444f' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+}
+
+/* --- 3. UNDER --- */
+.contract-icon-box .under-bar {
+  width: 16px;
+  height: 3px;
+  background: var(--icon-teal);
+  position: relative;
+}
+.contract-icon-box .under-arrow {
+  position: absolute;
+  width: 2px; height: 8px;
+  background: var(--icon-red);
+  top: 3px; right: 2px;
+  transform: rotate(-45deg);
+  transform-origin: top;
+}
+.contract-icon-box .under-arrow::after {
+  content: '';
+  position: absolute;
+  bottom: 0; right: -2px;
+  width: 4px; height: 4px;
+  border-right: 2px solid var(--icon-red);
+  border-bottom: 2px solid var(--icon-red);
+}
+.contract-icon-box .under-bar::before {
+  content: '';
+  position: absolute;
+  top: -2px; left: 1px;
+  width: 4px; height: 2px;
+  background: var(--icon-red);
+  transform: skewX(-45deg);
+}
+
+/* --- 4. EVEN --- */
+.contract-icon-box .even {
+  display: grid;
+  grid-template-columns: 7px 7px;
+  gap: 2px;
+}
+.contract-icon-box .sq { width: 7px; height: 7px; border-radius: 1px; }
+.contract-icon-box .sq.r { background: var(--icon-red); }
+.contract-icon-box .sq.t { background: var(--icon-teal); }
+
+/* --- 5. ODD --- */
+.contract-icon-box .odd {
+  position: relative;
+  width: 20px; height: 18px;
+}
+.contract-icon-box .tri {
+  position: absolute;
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+.contract-icon-box .tri.top {
+  border-bottom: 7px solid var(--icon-red);
+  top: 0; left: 50%; transform: translateX(-50%);
+}
+.contract-icon-box .tri.bot-l {
+  border-bottom: 7px solid var(--icon-teal);
+  bottom: 2px; left: 1px;
+}
+.contract-icon-box .tri.bot-r {
+  border-bottom: 7px solid var(--icon-teal);
+  bottom: 2px; right: 1px;
+}
+
+/* --- 6. MATCHES --- */
+.contract-icon-box .matches {
+  width: 3px; height: 14px;
+  background: var(--icon-teal);
+  position: relative;
+}
+.contract-icon-box .matches::before, .contract-icon-box .matches::after {
+  content: '>';
+  position: absolute;
+  color: var(--icon-red);
+  font-family: monospace;
+  font-size: 16px;
+  font-weight: bold;
+  top: 50%;
+  transform: translateY(-50%) scaleY(1.5);
+}
+.contract-icon-box .matches::before { left: -8px; }
+.contract-icon-box .matches::after { right: -8px; transform: translateY(-50%) scaleY(1.5) rotate(180deg); }
+
+/* --- 7. DIFFERS --- */
+.contract-icon-box .differs {
+  width: 3px; height: 14px;
+  background: var(--icon-teal);
+  position: relative;
+}
+.contract-icon-box .differs::before {
+  content: '>';
+  position: absolute;
+  color: var(--icon-red);
+  font-size: 14px;
+  left: -8px; top: -2px;
+  transform: rotate(-20deg);
+}
+.contract-icon-box .differs::after {
+  content: '<';
+  position: absolute;
+  color: var(--icon-red);
+  font-size: 14px;
+  right: -7px; bottom: -2px;
+  transform: rotate(-20deg);
+}
+
+/* --- 8. OVER --- */
+.contract-icon-box .over-bar {
+  width: 16px;
+  height: 3px;
+  background: var(--icon-teal);
+  position: relative;
+  margin-top: 6px;
+}
+.contract-icon-box .over-arrow {
+  position: absolute;
+  width: 2px; height: 8px;
+  background: var(--icon-red);
+  bottom: 3px; right: 2px;
+  transform: rotate(-45deg);
+  transform-origin: bottom;
+}
+.contract-icon-box .over-arrow::after {
+  content: '';
+  position: absolute;
+  top: 0; right: -2px;
+  width: 4px; height: 4px;
+  border-right: 2px solid var(--icon-red);
+  border-top: 2px solid var(--icon-red);
+}
+.contract-icon-box .over-bar::before {
+  content: '';
+  position: absolute;
+  bottom: -2px; left: 1px;
+  width: 4px; height: 2px;
+  background: var(--icon-red);
+  transform: skewX(-45deg);
+}
+
+/* --- 9. RISE --- */
+.contract-icon-box .rise {
+  width: 2px;
+  height: 12px;
+  background: var(--icon-red);
+  transform: rotate(-45deg);
+  position: relative;
+}
+.contract-icon-box .rise::after {
+  content: '';
+  position: absolute;
+  top: -1px; right: -3px;
+  width: 5px; height: 5px;
+  border-right: 2px solid var(--icon-red);
+  border-top: 2px solid var(--icon-red);
+}
+.contract-icon-box .rise::before {
+  content: '';
+  position: absolute;
+  bottom: -2px; left: -1px;
+  width: 3px; height: 2px;
+  background: var(--icon-teal);
+}
+
+/* Blockly Checkbox Styling - Ultra High Specificity */
+.zelos-renderer.zelos_renderer-theme .blocklyFieldCheckbox rect,
+.zelos-renderer.zelos_renderer-theme .blocklyFieldCheckbox .blocklyFieldRect,
+.blocklyFieldCheckbox rect,
+.blocklyFieldCheckbox .blocklyFieldRect,
+g.blocklyFieldCheckbox rect,
+g.blocklyFieldCheckbox .blocklyFieldRect,
+.blocklyCheckbox rect {
+  fill: #000000 !important;
+  stroke: #ffffff !important;
+  stroke-width: 1px !important;
+  fill-opacity: 1 !important;
+  opacity: 1 !important;
+  rx: 4px !important;
+  ry: 4px !important;
+}
+
+/* Specifically for the checkmark path - it should be black for visibility on white boxes */
+.blocklyFieldCheckbox .blocklyCheckboxCheck,
+.blocklyFieldCheckbox .blocklyCheckboxPath,
+.blocklyFieldCheckbox .blocklyCheckboxCheckmark,
+g.blocklyFieldCheckbox .blocklyCheckboxCheck,
+g.blocklyFieldCheckbox .blocklyCheckboxPath,
+.blocklyCheckbox path:not(rect),
+.blocklyFieldCheckbox path:not(rect) {
+  fill: none !important;
+  stroke: #000000 !important;
+  stroke-width: 3px !important;
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+  opacity: 1 !important;
+}
+
+/* Ensure the tick is black even if it's a text character */
+.blocklyFieldCheckbox text.blocklyText,
+g.blocklyFieldCheckbox text,
+g.blocklyFieldCheckbox text.blocklyText,
+.blocklyCheckbox text {
+  fill: #000000 !important;
+  stroke: none !important;
+  opacity: 1 !important;
+}
+
+/* Market Symbol Logos */
+.market-logo-box {
+  width: 32px;
+  height: 32px;
+  background: #151717;
+  border-radius: 6px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #2d2f2f;
+  flex-shrink: 0;
+  overflow: hidden;
+  padding: 2px;
+}
+
+.market-logo-box svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+}
+
+/* Volatility Candles */
+.candle-wick { stroke: var(--brand-teal); stroke-width: 2; }
+.candle-body { fill: var(--brand-teal); }
+
+/* Jump Bars */
+.jump-bar { stroke-width: 5.5; stroke-linecap: butt; }
+.jump-red { stroke: var(--brand-red); }
+.jump-teal { stroke: var(--brand-teal); }
+
+/* Boom/Crash Lines */
+.bc-line { stroke-width: 5; stroke-linecap: round; }
+.bc-cyan { stroke: var(--brand-cyan); }
+.bc-red { stroke: var(--brand-red); }
+
+.market-logo-box .vol-1s-dot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 10px;
+  height: 10px;
+  background: var(--brand-red);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 6px;
+  font-weight: bold;
+  color: white;
+  z-index: 5;
+  line-height: 1;
+}
+
+.market-logo-box .badge {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  background: #0e1113;
+  color: #ffffff;
+  font-size: 7px;
+  padding: 0 2px;
+  border-radius: 2px;
+  z-index: 2;
+  font-family: sans-serif;
+}
+/* --- Wait Design --- */
+.wait-design {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.wait-dot {
+  width: 4px;
+  height: 4px;
+  background-color: #aaaaaa;
+  border-radius: 50%;
+  animation: wait-bounce 1.4s infinite ease-in-out both;
+}
+
+.wait-dot:nth-child(1) { animation-delay: -0.32s; }
+.wait-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes wait-bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1.0); }
+}
+
+.pending-pulse {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  animation: shimmer 2s infinite;
+}
+
+/* Hide TradingView watermark, logo, or credits */
+a[href*="tradingview.com"],
+a[href*="tradingview"],
+div[class*="tradingview"],
+div[class*="tv-"] a,
+div[class*="tv-"] span,
+div[class*="logo"] a[href*="tradingview"],
+[class*="watermark"] {
+  display: none !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+

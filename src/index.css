@@ -5,6 +5,18 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+:root {
+  --brand-red: #ff444f;
+  --brand-green: #4bb4b3;
+  --brand-teal: #89A9AD;
+  --brand-cyan: #3fc6cf;
+  --barrier-grey: #a0a6aa;
+  --broken-grey: #6A7178;
+  --icon-red: #ff444f;
+  --icon-teal: #00a79e;
+  --icon-size: 24px;
+}
+
 @layer base {
   html {
     font-family: var(--font-sans);
@@ -16,7 +28,7 @@
   }
 }
 
-/* Custom subtle scrollbars for trading ledger */
+/* Custom subtle scrollbars for trading ledger and run panel */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -33,4 +45,143 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #374151;
+}
+
+/* --- Deriv Contract Icons --- */
+.stroke-red { stroke: var(--brand-red); stroke-width: 5; fill: none; }
+.stroke-red-thick { stroke: var(--brand-red); stroke-width: 6.5; fill: none; }
+.stroke-green { stroke: var(--brand-green); stroke-width: 5; fill: none; }
+.stroke-barrier { stroke: #e0e0e0; stroke-width: 4.5; fill: none; }
+.stroke-grey-thick { stroke: #e0e0e0; stroke-width: 6.5; fill: none; }
+.stroke-broken { stroke: var(--broken-grey); stroke-width: 6; fill: none; }
+
+.contract-icon-box {
+  position: relative;
+  width: var(--icon-size, 24px);
+  height: var(--icon-size, 24px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.contract-icon-box.w-4 { width: 1rem; height: 1rem; --icon-size: 1rem; }
+.contract-icon-box.w-5 { width: 1.25rem; height: 1.25rem; --icon-size: 1.25rem; }
+.contract-icon-box.w-6 { width: 1.5rem; height: 1.5rem; --icon-size: 1.5rem; }
+.contract-icon-box.w-7 { width: 1.75rem; height: 1.75rem; --icon-size: 1.75rem; }
+.contract-icon-box.w-8 { width: 2rem; height: 2rem; --icon-size: 2rem; }
+
+/* --- ACCU --- */
+.contract-icon-box .accu {
+  width: 16px;
+  height: 12px;
+  border-top: 3px solid #99c2c2;
+  border-bottom: 3px solid #99c2c2;
+  position: relative;
+}
+.contract-icon-box .accu::after {
+  content: '';
+  position: absolute;
+  top: 50%; left: 0;
+  width: 100%; height: 6px;
+  transform: translateY(-50%);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 10' preserveAspectRatio='none'%3E%3Cpath d='M0 5 L4 5 L7 9 L10 1 L13 9 L16 5 L20 5' fill='none' stroke='%23ff444f' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+}
+
+/* --- EVEN --- */
+.contract-icon-box .even {
+  display: grid;
+  grid-template-columns: 7px 7px;
+  gap: 2px;
+}
+.contract-icon-box .sq { width: 7px; height: 7px; border-radius: 1px; }
+.contract-icon-box .sq.r { background: var(--icon-red); }
+.contract-icon-box .sq.t { background: var(--icon-teal); }
+
+/* --- ODD --- */
+.contract-icon-box .odd {
+  position: relative;
+  width: 20px; height: 18px;
+}
+.contract-icon-box .tri {
+  position: absolute;
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+.contract-icon-box .tri.top {
+  border-bottom: 7px solid var(--icon-red);
+  top: 0; left: 50%; transform: translateX(-50%);
+}
+.contract-icon-box .tri.bot-l {
+  border-bottom: 7px solid var(--icon-teal);
+  bottom: 2px; left: 1px;
+}
+.contract-icon-box .tri.bot-r {
+  border-bottom: 7px solid var(--icon-teal);
+  bottom: 2px; right: 1px;
+}
+
+/* --- Market Symbol Logos --- */
+.market-logo-box {
+  width: 30px;
+  height: 30px;
+  background: #151717;
+  border-radius: 6px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #2d2f2f;
+  flex-shrink: 0;
+  overflow: hidden;
+  padding: 2px;
+}
+
+.market-logo-box svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+}
+
+.candle-wick { stroke: var(--brand-teal); stroke-width: 2; }
+.candle-body { fill: var(--brand-teal); }
+.jump-bar { stroke-width: 5.5; stroke-linecap: butt; }
+.jump-red { stroke: var(--brand-red); }
+.jump-teal { stroke: var(--brand-teal); }
+.bc-line { stroke-width: 5; stroke-linecap: round; }
+.bc-cyan { stroke: var(--brand-cyan); }
+.bc-red { stroke: var(--brand-red); }
+
+.market-logo-box .vol-1s-dot {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 10px;
+  height: 10px;
+  background: var(--brand-red);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 6px;
+  font-weight: bold;
+  color: white;
+  z-index: 5;
+  line-height: 1;
+}
+
+.market-logo-box .badge {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  background: #0e1113;
+  color: #ffffff;
+  font-size: 7px;
+  padding: 0 2px;
+  border-radius: 2px;
+  z-index: 2;
+  font-family: sans-serif;
 }

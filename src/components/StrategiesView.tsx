@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Play, Pencil, Trash2, Check, X } from 'lucide-react';
 import { BotSettings, MARKETS, SavedStrategy } from '../types';
+import { ContractIcon, MarketLogo } from './ContractIcons';
 
 interface StrategiesViewProps {
   strategies: SavedStrategy[];
@@ -103,12 +104,26 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
                         className="flex-1 rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-1.5 text-sm font-semibold text-white focus:border-blue-500 focus:outline-none"
                       />
                     ) : (
-                      <div>
-                        <h3 className="text-base font-semibold text-white">{s.name}</h3>
-                        <p className="mt-0.5 text-xs text-slate-400">
-                          {marketName(cfg.market)} · {cfg.exec === 'fast' ? 'Fast' : 'Normal'} ·{' '}
-                          {cfg.types.join(' > ')}
-                        </p>
+                      <div className="flex items-start gap-3">
+                        <MarketLogo symbol={cfg.market} />
+                        <div>
+                          <h3 className="text-base font-semibold text-white">{s.name}</h3>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+                            <span>{marketName(cfg.market)}</span>
+                            <span>·</span>
+                            <span>{cfg.exec === 'fast' ? 'Fast' : 'Normal'}</span>
+                            <span>·</span>
+                            <span className="inline-flex items-center gap-1.5">
+                              {cfg.types.map((t, i) => (
+                                <span key={`${t}-${i}`} className="inline-flex items-center gap-1 text-slate-200">
+                                  <ContractIcon type={t} className="w-4 h-4" />
+                                  <span>{t}</span>
+                                  {i < cfg.types.length - 1 && <span className="text-slate-500">&gt;</span>}
+                                </span>
+                              ))}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>

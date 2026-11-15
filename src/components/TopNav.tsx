@@ -1,158 +1,152 @@
-import React from 'react';
-import { RefreshCw, ShieldCheck, FlaskConical, KeyRound } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  ChevronDown,
+  Terminal,
+  Zap,
+  BarChart3,
+  Blocks,
+  CandlestickChart,
+} from 'lucide-react';
 import { AccountInfo } from '../types';
 
-export type NavTab = 'terminal' | 'strategies' | 'ledger';
+export type NavTab = 'terminal' | 'autobot' | 'analysis' | 'builder' | 'metatrader';
 
 interface TopNavProps {
   activeTab: NavTab;
   onTabChange: (tab: NavTab) => void;
   account: AccountInfo | null;
   onOpenTokenModal: () => void;
-  onRefreshBalance: () => void;
-  refreshing: boolean;
 }
+
+const NAV_ITEMS: { id: NavTab; label: string; mobileLabel: string; icon: React.ReactNode }[] = [
+  { id: 'terminal', label: 'Terminal', mobileLabel: 'Terminal', icon: <Terminal className="h-4 w-4" /> },
+  { id: 'autobot', label: 'AutoBot', mobileLabel: 'AutoBot', icon: <Zap className="h-4 w-4" /> },
+  { id: 'analysis', label: 'Analysis', mobileLabel: 'Analysis', icon: <BarChart3 className="h-4 w-4" /> },
+  { id: 'builder', label: 'Bot Builder', mobileLabel: 'Builder', icon: <Blocks className="h-4 w-4" /> },
+  { id: 'metatrader', label: 'MetaTrader', mobileLabel: 'MT5', icon: <CandlestickChart className="h-4 w-4" /> },
+];
 
 export const TopNav: React.FC<TopNavProps> = ({
   activeTab,
   onTabChange,
   account,
   onOpenTokenModal,
-  onRefreshBalance,
-  refreshing,
 }) => {
-  const navItems: { id: NavTab; label: string }[] = [
-    { id: 'terminal', label: 'Terminal' },
-    { id: 'strategies', label: 'Strategies' },
-    { id: 'ledger', label: 'Trade Ledger' },
-  ];
+  const [logoFailed, setLogoFailed] = useState(false);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-[#1F2937] bg-[#0B0F17]/95 backdrop-blur-sm">
-      <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between gap-8 px-4 sm:px-6">
-        {/* Zone 1: Single-element Brand Wordmark */}
-        <button
-          type="button"
-          onClick={() => onTabChange('terminal')}
-          className="text-left text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded"
-        >
-          DerivBot Studio
-        </button>
-
-        {/* Zone 2: Clean single-line text navigation links */}
-        <nav className="hidden md:flex items-center gap-7" aria-label="Main navigation">
-          {navItems.map((item) => {
-            const active = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onTabChange(item.id)}
-                className={`relative py-1 text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded ${
-                  active
-                    ? 'text-white'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
+    <>
+      <header className="sticky top-0 z-30 border-b border-[#1F2937] bg-[#0B0F17]/95 backdrop-blur-sm">
+        <div className="flex h-16 w-full items-center justify-between gap-3 sm:gap-6 px-3 sm:px-6 lg:px-8">
+          {/* Zone 1: Brand Logo + OTIVO AI CLOUD */}
+          <button
+            type="button"
+            onClick={() => onTabChange('terminal')}
+            className="flex items-center gap-2 text-left text-sm sm:text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ff444f] rounded"
+          >
+            {!logoFailed ? (
+              <img
+                src="/logo.png"
+                alt="OTIVO AI CLOUD logo"
+                referrerPolicy="no-referrer"
+                onError={() => setLogoFailed(true)}
+                className="h-7 w-7 sm:h-8 sm:w-8 rounded-md object-contain shrink-0"
+              />
+            ) : (
+              <span
+                className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-md border border-[#1F2937] bg-[#111827] font-mono text-xs font-bold text-[#ff444f] shrink-0"
+                aria-hidden="true"
               >
-                {item.label}
-                {active && (
-                  <span className="absolute inset-x-0 -bottom-[21px] h-[2px] bg-blue-500" />
-                )}
-              </button>
-            );
-          })}
-        </nav>
+                OA
+              </span>
+            )}
+            <span>OTIVO AI CLOUD</span>
+          </button>
 
-        {/* Zone 3: Navigation Corner — Live Account Balance & Real/Demo Detection */}
-        <div className="flex items-center gap-3 shrink-0">
-          {account && account.connected ? (
-            <div className="flex items-center gap-3">
+          {/* Zone 2: Clean single-line text navigation links */}
+          <nav className="hidden md:flex items-center gap-6 lg:gap-7" aria-label="Main navigation">
+            {NAV_ITEMS.map((item) => {
+              const active = activeTab === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onTabChange(item.id)}
+                  className={`relative py-1 text-sm font-medium transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded ${
+                    active ? 'text-white' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {item.label}
+                  {active && (
+                    <span className="absolute inset-x-0 -bottom-[21px] h-[2px] bg-[#ff444f]" />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Zone 3: Navigation Corner — Live Account Balance & Real/Demo Detection OR Single Red Connect Button */}
+          <div className="flex items-center gap-2 shrink-0">
+            {account && account.connected ? (
               <button
                 type="button"
                 onClick={onOpenTokenModal}
-                className="flex items-center gap-3 rounded-lg border border-[#1F2937] bg-[#111827] px-3.5 py-1.5 text-left transition-colors hover:border-slate-700 hover:bg-[#161E2E] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                title="Manage API token and account connection"
+                className="flex flex-col items-end rounded-lg px-2.5 py-1 text-right transition-colors hover:bg-[#111827] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                title={`Connected ${account.accountType} (${account.loginId}) — Click to manage`}
               >
-                <div className="flex items-center gap-1.5 whitespace-nowrap shrink-0">
-                  {account.isVirtual ? (
-                    <FlaskConical className="h-4 w-4 text-amber-400" aria-hidden="true" />
-                  ) : (
-                    <ShieldCheck className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-                  )}
+                <span className="flex items-center gap-1 whitespace-nowrap">
                   <span
-                    className={`text-xs font-semibold tracking-wide whitespace-nowrap ${
-                      account.isVirtual ? 'text-amber-400' : 'text-emerald-400'
+                    className={`text-xs font-semibold leading-tight ${
+                      account.isVirtual ? 'text-[#f59e0b]' : 'text-[#00a79e]'
                     }`}
                   >
-                    {account.accountType}
+                    {account.isVirtual ? 'Demo account' : 'Real account'}
                   </span>
-                </div>
-
-                <span className="h-4 w-px bg-[#1F2937]" aria-hidden="true" />
-
-                <div className="flex items-baseline gap-1.5 whitespace-nowrap shrink-0">
-                  <span className="font-mono text-sm font-semibold text-white tabular-nums">
-                    {account.balance.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </span>
-                  <span className="font-mono text-xs font-medium text-slate-400">
-                    {account.currency}
-                  </span>
-                </div>
-
-                <span
-                  className="hidden sm:inline text-xs font-mono text-slate-500 whitespace-nowrap"
-                  aria-label="Account login ID"
-                >
-                  {account.loginId}
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                </span>
+                <span className="font-mono text-xs sm:text-sm font-bold text-white tabular-nums whitespace-nowrap leading-tight mt-0.5">
+                  {account.balance.toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })}{' '}
+                  {account.currency}
                 </span>
               </button>
-
+            ) : (
               <button
                 type="button"
-                onClick={onRefreshBalance}
-                disabled={refreshing}
-                aria-label="Refresh account balance"
-                className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#1F2937] bg-[#111827] text-slate-400 transition-colors hover:border-slate-700 hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                onClick={onOpenTokenModal}
+                className="rounded-lg bg-[#ff444f] px-3.5 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white transition-colors hover:bg-[#e63a44] active:scale-[0.99] whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ff444f]"
               >
-                <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+                Connect API Token
               </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={onOpenTokenModal}
-              className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-500 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-            >
-              <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Connect API Token</span>
-            </button>
-          )}
+            )}
+          </div>
         </div>
-      </div>
+      </header>
 
-      {/* Mobile navigation strip */}
-      <div className="flex md:hidden border-t border-[#1F2937] px-4">
-        {navItems.map((item) => {
+      {/* Mobile Fixed Bottom Navigation Bar */}
+      <nav
+        className="fixed bottom-0 inset-x-0 z-40 grid grid-cols-5 border-t border-[#1F2937] bg-[#0B0F17]/95 backdrop-blur-md md:hidden"
+        aria-label="Mobile navigation"
+      >
+        {NAV_ITEMS.map((item) => {
           const active = activeTab === item.id;
           return (
             <button
               key={item.id}
               type="button"
               onClick={() => onTabChange(item.id)}
-              className={`flex-1 py-2.5 text-center text-xs font-medium transition-colors whitespace-nowrap ${
-                active
-                  ? 'border-b-2 border-blue-500 text-white'
-                  : 'text-slate-400 hover:text-slate-200'
+              className={`flex flex-col items-center justify-center gap-1 py-2 min-h-[58px] text-[11px] font-medium transition-colors ${
+                active ? 'text-[#ff444f]' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              {item.label}
+              {item.icon}
+              <span className="truncate max-w-full px-1">{item.mobileLabel}</span>
             </button>
           );
         })}
-      </div>
-    </header>
+      </nav>
+    </>
   );
 };

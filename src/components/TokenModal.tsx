@@ -65,20 +65,26 @@ export const TokenModal: React.FC<TokenModalProps> = ({
     }
     setLoading(true);
     try {
+      const payload = {
+        token: token.trim(),
+        authMode,
+        accountId: accountId.trim() || undefined,
+        appId: appId.trim() || undefined,
+        virtualToken: virtualToken.trim() || undefined,
+      };
       const res = await fetch('/api/account/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: token.trim(),
-          authMode,
-          accountId: accountId.trim() || undefined,
-          appId: appId.trim() || undefined,
-          virtualToken: virtualToken.trim() || undefined,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Connection failed.');
+      }
+      try {
+        localStorage.setItem('otivo_saved_connection', JSON.stringify(payload));
+      } catch {
+        // ignore storage errors
       }
       onConnected(data.account);
       setToken('');
@@ -98,6 +104,11 @@ export const TokenModal: React.FC<TokenModalProps> = ({
       const res = await fetch('/api/account/disconnect', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Disconnect failed.');
+      try {
+        localStorage.removeItem('otivo_saved_connection');
+      } catch {
+        // ignore
+      }
       onDisconnected();
     } catch (err: any) {
       setError(err?.message || 'Could not disconnect.');

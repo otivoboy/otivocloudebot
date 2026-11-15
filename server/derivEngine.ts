@@ -2,18 +2,23 @@ import WebSocket from 'ws';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {
+import type {
   AccountInfo,
   AppSnapshot,
   AuthMode,
   BotSettings,
   LogEntry,
-  MARKETS,
+  OpenPosition,
   SavedStrategy,
   SessionStats,
   TickPoint,
   TradeRecord,
   TradeType,
+} from '../src/types.ts';
+import {
+  MARKETS,
+  MT5_SYMBOLS,
+  DEFAULT_SETTINGS,
   BARRIER_TYPES,
   DIGIT_TYPES,
   DUAL_TYPES,
@@ -22,18 +27,40 @@ import {
 
 const DEFAULT_WS_APP_ID = '1089';
 const PAT_API_URL = 'https://api.derivws.com/trading/v1/options';
-const DEFAULT_PAT_APP_ID = '34SRQBBtI5nwEFQqmc3se';
+export const DERIV_DATA_APP_ID = '34SRQBBtI5nwEFQqmc3se';
+const DEFAULT_PAT_APP_ID = DERIV_DATA_APP_ID;
+const PUBLIC_WS_URL = `wss://api.derivws.com/trading/v1/options/ws/public?app_id=${DERIV_DATA_APP_ID}`;
 const MAX_MART_STAKE = 1_000_000;
 const STRATEGIES_FILE = path.resolve(process.cwd(), 'data', 'strategies.json');
+const CONNECTION_FILE = path.resolve(process.cwd(), 'data', 'connection.json');
+const SETTINGS_FILE = path.resolve(process.cwd(), 'data', 'settings.json');
 
 type Listener = (event: string, payload: unknown) => void;
 
-const MARKET_DECIMALS: Record<string, number> = Object.fromEntries(
-  MARKETS.map((m) => [m.symbol, m.decimals])
-);
-const MARKET_LABELS: Record<string, string> = Object.fromEntries(
-  MARKETS.map((m) => [m.symbol, m.label])
-);
+const EXTRA_MARKET_DECIMALS: Record<string, number> = {
+  JD10: 2,
+  JD25: 2,
+  JD50: 2,
+  JD100: 2,
+  RDBULL: 4,
+  RDBEAR: 4,
+  BOOM300N: 4,
+  CRASH300N: 4,
+  BOOM600: 4,
+  BOOM900: 4,
+  CRASH600: 4,
+  CRASH900: 4,
+};
+
+const MARKET_DECIMALS: Record<string, number> = {
+  ...EXTRA_MARKET_DECIMALS,
+  ...Object.fromEntries(MT5_SYMBOLS.map((m) => [m.symbol, m.decimals])),
+  ...Object.fromEntries(MARKETS.map((m) => [m.symbol, m.decimals])),
+};
+const MARKET_LABELS: Record<string, string> = {
+  ...Object.fromEntries(MT5_SYMBOLS.map((m) => [m.symbol, m.label])),
+  ...Object.fromEntries(MARKETS.map((m) => [m.symbol, m.label])),
+};
 
 function extractLastDigit(quote: number, symbol: string): number {
   const dec = MARKET_DECIMALS[symbol] ?? 2;
@@ -66,27 +93,62 @@ class DerivWsConnection {
   private pending = new Map<number, PendingReq>();
   private subscribers = new Set<(msg: any) => void>();
   private closedByCaller = false;
+  private abortConnect: ((err: Error) => void) | null = null;
 
-  async connect(url: string): Promise<void> {
+  async connect(
+    url: string,
+    timeoutMs = 20_000,
+    headers?: Record<string, string>
+  ): Promise<void> {
     this.closedByCaller = false;
     await this.close();
     this.closedByCaller = false;
 
     await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = headers ? new WebSocket(url, { headers }) : new WebSocket(url);
       this.ws = ws;
+      let settled = false;
 
-      const onOpen = () => {
-        ws.off('error', onError);
-        resolve();
-      };
-      const onError = (err: Error) => {
-        ws.off('open', onOpen);
-        reject(err);
+      // Always keep an error listener attached for the entire socket lifetime
+      // so asynchronous socket errors or CONNECTING aborts never crash Node.js.
+      const handleSocketError = (err: Error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(connectTimer);
+          this.abortConnect = null;
+          reject(err);
+        }
       };
 
-      ws.once('open', onOpen);
-      ws.once('error', onError);
+      ws.on('error', handleSocketError);
+
+      const connectTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          this.abortConnect = null;
+          this.safeDisposeSocket(ws);
+          if (this.ws === ws) this.ws = null;
+          reject(new Error('Deriv WebSocket connection timed out'));
+        }
+      }, timeoutMs);
+
+      this.abortConnect = (err: Error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(connectTimer);
+          this.abortConnect = null;
+          reject(err);
+        }
+      };
+
+      ws.once('open', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(connectTimer);
+          this.abortConnect = null;
+          resolve();
+        }
+      });
 
       ws.on('message', (raw) => {
         try {
@@ -107,6 +169,15 @@ class DerivWsConnection {
       });
 
       ws.on('close', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(connectTimer);
+          this.abortConnect = null;
+          reject(new Error('WebSocket closed before opening'));
+        }
+        if (this.ws === ws) {
+          this.ws = null;
+        }
         for (const [rid, p] of this.pending.entries()) {
           clearTimeout(p.timer);
           p.reject(new Error('WebSocket connection closed'));
@@ -114,6 +185,26 @@ class DerivWsConnection {
         }
       });
     });
+  }
+
+  private safeDisposeSocket(ws: WebSocket): void {
+    try {
+      ws.removeAllListeners('open');
+      ws.removeAllListeners('message');
+      ws.removeAllListeners('close');
+      // Keep a no-op error listener attached so ws.close()/terminate() during
+      // CONNECTING never emits an unhandled 'error' event.
+      ws.removeAllListeners('error');
+      ws.on('error', () => {});
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        ws.terminate();
+      }
+    } catch {
+      // ignore disposal errors
+    }
   }
 
   isOpen(): boolean {
@@ -139,31 +230,37 @@ class DerivWsConnection {
       }, timeoutMs);
 
       this.pending.set(reqId, { resolve, reject, timer });
-      this.ws!.send(JSON.stringify(body), (err) => {
-        if (err) {
-          this.pending.delete(reqId);
-          clearTimeout(timer);
-          reject(err);
-        }
-      });
+      try {
+        this.ws!.send(JSON.stringify(body), (err) => {
+          if (err) {
+            this.pending.delete(reqId);
+            clearTimeout(timer);
+            reject(err);
+          }
+        });
+      } catch (err: any) {
+        this.pending.delete(reqId);
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
   async close(): Promise<void> {
     this.closedByCaller = true;
+    if (this.abortConnect) {
+      this.abortConnect(new Error('Connection closed by caller'));
+      this.abortConnect = null;
+    }
     for (const [rid, p] of this.pending.entries()) {
       clearTimeout(p.timer);
       p.reject(new Error('Connection closed'));
       this.pending.delete(rid);
     }
-    if (this.ws) {
-      try {
-        this.ws.removeAllListeners();
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) {
+      this.safeDisposeSocket(ws);
     }
   }
 
@@ -187,6 +284,15 @@ export class DerivBotEngine {
   private tickConn: DerivWsConnection | null = null;
   private tickMarket = 'R_100';
   private ticks: TickPoint[] = [];
+
+  private multiTickConn: DerivWsConnection | null = null;
+  private multiSubscribedSymbols = new Set<string>();
+  private multiTicks: Record<string, TickPoint[]> = {};
+
+  private positions = new Map<string, OpenPosition>();
+  private subscribedPositionIds = new Set<string>();
+
+  private settings: BotSettings = structuredClone(DEFAULT_SETTINGS);
   private strategies: SavedStrategy[] = [];
   private trades: TradeRecord[] = [];
   private logs: LogEntry[] = [];
@@ -199,12 +305,18 @@ export class DerivBotEngine {
 
   constructor() {
     this.loadStrategies();
+    this.loadSettings();
+    if (this.settings.market && MARKET_DECIMALS[this.settings.market]) {
+      this.tickMarket = this.settings.market;
+    }
     this.startTickStream(this.tickMarket).catch(() => {});
+    this.restorePersistedConnection().catch(() => {});
   }
 
   private createIdleSession(): SessionStats {
     return {
       status: 'idle',
+      contractStage: 'NOT_RUNNING',
       realTrades: 0,
       realWins: 0,
       realLosses: 0,
@@ -213,6 +325,8 @@ export class DerivBotEngine {
       virtualLossesStreak: 0,
       vneed: 0,
       inRealPhase: true,
+      totalStake: 0,
+      totalPayout: 0,
       totalProfit: 0,
       currentStake: 0,
       baseStake: 0,
@@ -259,10 +373,94 @@ export class DerivBotEngine {
       strategies: this.strategies,
       ticks: this.ticks,
       tickMarket: this.tickMarket,
+      settings: this.settings,
+      multiTicks: this.multiTicks,
+      positions: Array.from(this.positions.values()),
     };
   }
 
-  // ---------- Persistence for Strategies ----------
+  // ---------- Persistence for Connection, Settings & Strategies ----------
+  private ensureDataDir(): void {
+    const dir = path.dirname(STRATEGIES_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+
+  private loadSettings(): void {
+    try {
+      if (fs.existsSync(SETTINGS_FILE)) {
+        const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          this.settings = { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
+        }
+      }
+    } catch {
+      this.settings = structuredClone(DEFAULT_SETTINGS);
+    }
+  }
+
+  getSettings(): BotSettings {
+    return this.settings;
+  }
+
+  saveSettings(next: BotSettings): BotSettings {
+    this.settings = { ...structuredClone(DEFAULT_SETTINGS), ...structuredClone(next) };
+    try {
+      this.ensureDataDir();
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2));
+    } catch {
+      // ignore if read-only
+    }
+    this.emit('settings', this.settings);
+    return this.settings;
+  }
+
+  private saveConnectionToDisk(creds: {
+    token: string;
+    authMode: AuthMode;
+    accountId?: string;
+    appId: string;
+    virtualToken?: string;
+  }): void {
+    try {
+      this.ensureDataDir();
+      fs.writeFileSync(CONNECTION_FILE, JSON.stringify(creds, null, 2));
+    } catch {
+      // ignore
+    }
+  }
+
+  private clearConnectionFromDisk(): void {
+    try {
+      if (fs.existsSync(CONNECTION_FILE)) {
+        fs.unlinkSync(CONNECTION_FILE);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private async restorePersistedConnection(): Promise<void> {
+    try {
+      if (!fs.existsSync(CONNECTION_FILE)) return;
+      const raw = fs.readFileSync(CONNECTION_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.token === 'string' && parsed.token.trim()) {
+        await this.connectAccount({
+          token: parsed.token,
+          authMode: parsed.authMode,
+          accountId: parsed.accountId,
+          appId: parsed.appId,
+          virtualToken: parsed.virtualToken,
+        });
+      }
+    } catch {
+      // ignore invalid saved connection on boot
+    }
+  }
+
   private loadStrategies(): void {
     try {
       if (fs.existsSync(STRATEGIES_FILE)) {
@@ -279,10 +477,7 @@ export class DerivBotEngine {
 
   private saveStrategiesToDisk(): void {
     try {
-      const dir = path.dirname(STRATEGIES_FILE);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
+      this.ensureDataDir();
       fs.writeFileSync(STRATEGIES_FILE, JSON.stringify(this.strategies, null, 2));
     } catch {
       // ignore if read-only
@@ -380,11 +575,21 @@ export class DerivBotEngine {
     this.tickConn = conn;
 
     try {
-      const appId =
-        this.credentials?.authMode === 'api_token'
-          ? this.credentials.appId
-          : DEFAULT_WS_APP_ID;
-      await conn.connect(`wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(appId)}`);
+      if (this.credentials?.authMode === 'api_token') {
+        try {
+          await conn.connect(
+            `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(this.credentials.appId)}`
+          );
+        } catch {
+          await conn.connect(PUBLIC_WS_URL, 20_000, {
+            'Deriv-App-ID': DERIV_DATA_APP_ID,
+          });
+        }
+      } else {
+        await conn.connect(PUBLIC_WS_URL, 20_000, {
+          'Deriv-App-ID': DERIV_DATA_APP_ID,
+        });
+      }
 
       conn.onMessage((msg) => {
         if (msg.msg_type === 'history' && msg.history) {
@@ -425,6 +630,65 @@ export class DerivBotEngine {
       if (!conn.wasClosedByCaller()) {
         this.addLog('warn', `Market stream error: ${err?.message ?? 'Disconnected'}`);
       }
+    }
+  }
+
+  // ---------- Multi-Market Tick Stream (for AutoBot & Analysis Tool) ----------
+  async subscribeMultiMarkets(symbols: string[]): Promise<void> {
+    const valid = Array.from(
+      new Set(symbols.map((s) => s.trim()).filter((s) => s.length > 0))
+    ).slice(0, 20);
+    if (valid.length === 0) return;
+
+    if (!this.multiTickConn || !this.multiTickConn.isOpen()) {
+      const conn = new DerivWsConnection();
+      this.multiTickConn = conn;
+      this.multiSubscribedSymbols.clear();
+      await conn.connect(PUBLIC_WS_URL, 20_000, {
+        'Deriv-App-ID': DERIV_DATA_APP_ID,
+      });
+      conn.onMessage((msg) => {
+        if (msg.msg_type === 'history' && msg.history && msg.echo_req?.ticks_history) {
+          const sym = String(msg.echo_req.ticks_history);
+          const prices: number[] = msg.history.prices ?? [];
+          const times: number[] = msg.history.times ?? [];
+          const pts: TickPoint[] = prices.map((p, i) => ({
+            epoch: times[i] ?? Math.floor(Date.now() / 1000),
+            quote: Number(p),
+            lastDigit: extractLastDigit(Number(p), sym),
+          }));
+          this.multiTicks[sym] = pts.slice(-200);
+          this.emit('multi_ticks', { symbol: sym, ticks: this.multiTicks[sym] });
+        } else if (msg.msg_type === 'tick' && msg.tick) {
+          const sym = String(msg.tick.symbol);
+          const q = Number(msg.tick.quote);
+          const pt: TickPoint = {
+            epoch: Number(msg.tick.epoch),
+            quote: q,
+            lastDigit: extractLastDigit(q, sym),
+          };
+          const prev = this.multiTicks[sym] ?? [];
+          this.multiTicks[sym] = [...prev, pt].slice(-200);
+          this.emit('multi_tick', { symbol: sym, tick: pt });
+        }
+      });
+    }
+
+    const toSubscribe = valid.filter((sym) => !this.multiSubscribedSymbols.has(sym));
+    for (const sym of toSubscribe) {
+      this.multiSubscribedSymbols.add(sym);
+      this.multiTickConn
+        .request({
+          ticks_history: sym,
+          adjust_start_time: 1,
+          count: 150,
+          end: 'latest',
+          style: 'ticks',
+          subscribe: 1,
+        })
+        .catch(() => {
+          this.multiSubscribedSymbols.delete(sym);
+        });
     }
   }
 
@@ -557,6 +821,36 @@ export class DerivBotEngine {
           lastUpdated: nowIso(),
         };
         this.emit('account', this.account);
+      } else if (msg.msg_type === 'proposal_open_contract' && msg.proposal_open_contract) {
+        const poc = msg.proposal_open_contract;
+        const cid = String(poc.contract_id);
+        if (this.subscribedPositionIds.has(cid)) {
+          const sym = String(poc.underlying_symbol || poc.underlying || poc.symbol || '');
+          const pos: OpenPosition = {
+            id: cid,
+            symbol: sym,
+            contractType: String(poc.contract_type || ''),
+            buyPrice: Number(poc.buy_price ?? 0),
+            profit: Number(poc.profit ?? 0),
+            currency: String(poc.currency || this.account?.currency || 'USD'),
+            entrySpot: poc.entry_spot !== undefined ? Number(poc.entry_spot) : undefined,
+            currentSpot: poc.current_spot !== undefined ? Number(poc.current_spot) : undefined,
+            isSold: Boolean(poc.is_sold),
+          };
+          if (poc.is_sold) {
+            this.positions.delete(cid);
+            this.subscribedPositionIds.delete(cid);
+            this.emit('mt_closed', {
+              ...pos,
+              entrySpot: poc.entry_tick_display_value || poc.entry_spot,
+              exitSpot: poc.exit_tick_display_value || poc.exit_tick,
+              timestamp: nowIso(),
+            });
+          } else {
+            this.positions.set(cid, pos);
+          }
+          this.emit('positions', Array.from(this.positions.values()));
+        }
       }
     });
   }
@@ -613,8 +907,10 @@ export class DerivBotEngine {
     }, 25_000);
 
     this.session.currency = info.currency;
+    this.saveConnectionToDisk(creds);
     this.emit('account', this.account);
     this.emit('session', this.session);
+    this.addLog('info', `You are using your ${info.currency} account (${info.accountType} · ${info.loginId}).`);
     this.addLog(
       'info',
       `Connected ${info.accountType} account (${info.loginId}) · Balance ${info.balance.toFixed(2)} ${info.currency}`
@@ -622,6 +918,7 @@ export class DerivBotEngine {
 
     // Refresh tick stream if appId changed
     this.startTickStream(this.tickMarket).catch(() => {});
+    this.fetchPortfolio().catch(() => {});
 
     return info;
   }
@@ -669,9 +966,147 @@ export class DerivBotEngine {
     }
     this.credentials = null;
     this.account = null;
+    this.positions.clear();
+    this.subscribedPositionIds.clear();
     this.cfCache.clear();
+    this.clearConnectionFromDisk();
     this.emit('account', null);
+    this.emit('positions', []);
     this.addLog('info', 'Account disconnected and token cleared from memory.');
+  }
+
+  // ---------- MetaTrader Instant Orders & Positions ----------
+  async fetchPortfolio(): Promise<OpenPosition[]> {
+    if (!this.accountConn || !this.credentials) return [];
+    if (!this.accountConn.isOpen()) {
+      const { conn, info } = await this.openAccountConnection(this.credentials);
+      this.accountConn = conn;
+      this.account = info;
+      this.attachAccountListeners(conn);
+    }
+    const res = await this.accountConn.request({ portfolio: 1 });
+    if (res.error) throw new Error(res.error.message);
+    const contracts: any[] = res.portfolio?.contracts ?? [];
+    const activeIds = new Set<string>();
+    for (const c of contracts) {
+      const cid = String(c.contract_id);
+      activeIds.add(cid);
+      if (!this.positions.has(cid)) {
+        this.positions.set(cid, {
+          id: cid,
+          symbol: String(c.symbol || c.underlying || ''),
+          contractType: String(c.contract_type || ''),
+          buyPrice: Number(c.buy_price ?? 0),
+          profit: 0,
+          currency: this.account?.currency || 'USD',
+        });
+      }
+      if (!this.subscribedPositionIds.has(cid)) {
+        this.subscribedPositionIds.add(cid);
+        this.accountConn
+          .request({
+            proposal_open_contract: 1,
+            contract_id: Number(cid) || cid,
+            subscribe: 1,
+          })
+          .catch(() => {});
+      }
+    }
+    for (const cid of Array.from(this.positions.keys())) {
+      if (!activeIds.has(cid)) {
+        this.positions.delete(cid);
+        this.subscribedPositionIds.delete(cid);
+      }
+    }
+    const list = Array.from(this.positions.values());
+    this.emit('positions', list);
+    return list;
+  }
+
+  async placeManualOrder(params: {
+    symbol: string;
+    contractType: string;
+    stake: number;
+    multiplier?: number;
+    duration?: number;
+    durationUnit?: string;
+  }): Promise<OpenPosition> {
+    if (!this.account || !this.credentials || !this.accountConn) {
+      throw new Error('Connect your Deriv API token before placing an order.');
+    }
+    if (!this.accountConn.isOpen()) {
+      const { conn, info } = await this.openAccountConnection(this.credentials);
+      this.accountConn = conn;
+      this.account = info;
+      this.attachAccountListeners(conn);
+    }
+
+    const stake = Number(params.stake);
+    if (!Number.isFinite(stake) || stake <= 0) {
+      throw new Error('Order stake must be greater than 0.');
+    }
+
+    const symbolKey = this.credentials.authMode === 'pat' ? 'underlying_symbol' : 'symbol';
+    const currency = this.account.currency || 'USD';
+    const orderParams: Record<string, unknown> = {
+      amount: stake,
+      basis: 'stake',
+      contract_type: params.contractType,
+      currency,
+      [symbolKey]: params.symbol,
+    };
+
+    if (params.contractType === 'MULTUP' || params.contractType === 'MULTDOWN') {
+      orderParams.multiplier = params.multiplier ?? 100;
+    } else {
+      orderParams.duration = params.duration ?? 1;
+      orderParams.duration_unit = params.durationUnit ?? 'm';
+    }
+
+    const buyRes = await this.accountConn.request({
+      buy: 1,
+      price: stake,
+      parameters: orderParams,
+    });
+    if (buyRes.error) {
+      throw new Error(buyRes.error.message || 'Order rejected by Deriv.');
+    }
+
+    const cid = String(buyRes.buy.contract_id);
+    const pos: OpenPosition = {
+      id: cid,
+      symbol: params.symbol,
+      contractType: params.contractType,
+      buyPrice: Number(buyRes.buy.buy_price ?? stake),
+      profit: 0,
+      currency,
+    };
+    this.positions.set(cid, pos);
+    this.subscribedPositionIds.add(cid);
+    this.emit('positions', Array.from(this.positions.values()));
+
+    this.accountConn
+      .request({
+        proposal_open_contract: 1,
+        contract_id: Number(cid) || cid,
+        subscribe: 1,
+      })
+      .catch(() => {});
+
+    return pos;
+  }
+
+  async closePosition(contractId: string): Promise<void> {
+    if (!this.accountConn || !this.accountConn.isOpen()) {
+      throw new Error('Deriv account connection is not active.');
+    }
+    const res = await this.accountConn.request({
+      sell: Number(contractId) || contractId,
+      price: 0,
+    });
+    if (res.error) {
+      throw new Error(res.error.message || 'Could not close position.');
+    }
   }
 
   // ---------- Trading Helpers ----------
@@ -1234,6 +1669,7 @@ export class DerivBotEngine {
 
     const s = structuredClone(rawSettings);
     this.validateSettings(s);
+    this.saveSettings(s);
 
     // Ensure tick chart matches trading market
     this.startTickStream(s.market).catch(() => {});
@@ -1248,6 +1684,7 @@ export class DerivBotEngine {
 
     this.session = {
       status: 'running',
+      contractStage: 'STARTING',
       startedAt: nowIso(),
       realTrades: 0,
       realWins: 0,
@@ -1257,6 +1694,8 @@ export class DerivBotEngine {
       virtualLossesStreak: 0,
       vneed: s.virtual ? s.vneed : 0,
       inRealPhase: !s.virtual,
+      totalStake: 0,
+      totalPayout: 0,
       totalProfit: 0,
       currentStake: baseStake,
       baseStake,
@@ -1278,6 +1717,21 @@ export class DerivBotEngine {
     this.activeLoopPromise = this.runTradingLoop(s);
   }
 
+  resetStats(): void {
+    if (this.session.status === 'running' || this.session.status === 'stopping') {
+      throw new Error('Stop the bot before resetting statistics.');
+    }
+    this.trades = [];
+    this.logs = [];
+    this.session = this.createIdleSession();
+    if (this.account) {
+      this.addLog('info', `You are using your ${this.account.currency} account.`);
+    }
+    this.emit('trades_reset', []);
+    this.emit('logs_reset', this.logs);
+    this.emit('session', this.session);
+  }
+
   async stopSession(): Promise<void> {
     if (this.session.status !== 'running') {
       return;
@@ -1286,6 +1740,7 @@ export class DerivBotEngine {
     this.session = {
       ...this.session,
       status: 'stopping',
+      contractStage: 'IS_STOPPING',
     };
     this.emit('session', this.session);
     this.addLog('warn', 'Stop requested. Finishing current contract before halting...');
@@ -1457,6 +1912,8 @@ export class DerivBotEngine {
           }
 
           const vWon = vProfit > 0;
+          const vTotalStake = DUAL_TYPES.includes(t) ? vStake * 2 : vStake;
+          const vPayout = vProfit > 0 ? Number((vTotalStake + vProfit).toFixed(2)) : 0;
           vloss = vWon ? 0 : vloss + 1;
           seq += 1;
 
@@ -1470,7 +1927,8 @@ export class DerivBotEngine {
             contractType: t,
             label,
             contractIds: cids,
-            stake: DUAL_TYPES.includes(t) ? vStake * 2 : vStake,
+            stake: vTotalStake,
+            payout: vPayout,
             currency: virtualCurrency,
             ticks: tk,
             entrySpot,
@@ -1485,6 +1943,7 @@ export class DerivBotEngine {
           this.trades = [record, ...this.trades].slice(0, 500);
           this.session = {
             ...this.session,
+            contractStage: this.stopRequested ? 'IS_STOPPING' : 'CONTRACT_CLOSED',
             virtualTrades: this.session.virtualTrades + 1,
             virtualWins: this.session.virtualWins + (vWon ? 1 : 0),
             virtualLossesStreak: vloss,
@@ -1511,6 +1970,12 @@ export class DerivBotEngine {
         }
 
         // ----- REAL TRADE PHASE -----
+        this.session = {
+          ...this.session,
+          contractStage: this.stopRequested ? 'IS_STOPPING' : 'PURCHASE_SENT',
+        };
+        this.emit('session', this.session);
+
         const conn = await ensureAccountConn();
         const authMode = this.credentials!.authMode;
         const currency = this.account!.currency;
@@ -1520,6 +1985,12 @@ export class DerivBotEngine {
         let entrySpot: number | undefined;
         let exitSpot: number | undefined;
         let legs: number[] | undefined;
+
+        this.session = {
+          ...this.session,
+          contractStage: this.stopRequested ? 'IS_STOPPING' : 'CONTRACT_OPEN',
+        };
+        this.emit('session', this.session);
 
         if (DUAL_TYPES.includes(t)) {
           const res = await this.executeDualContract(
@@ -1558,6 +2029,8 @@ export class DerivBotEngine {
         total = Number((total + profit).toFixed(2));
         const won = profit > 0;
         seq += 1;
+        const effectiveStake = DUAL_TYPES.includes(t) ? Number((stake * 2).toFixed(2)) : stake;
+        const payout = profit > 0 ? Number((effectiveStake + profit).toFixed(2)) : 0;
 
         let balanceAfter = this.account?.balance;
         if (!fast) {
@@ -1579,7 +2052,8 @@ export class DerivBotEngine {
           contractType: t,
           label,
           contractIds,
-          stake: DUAL_TYPES.includes(t) ? Number((stake * 2).toFixed(2)) : stake,
+          stake: effectiveStake,
+          payout,
           currency,
           ticks: tk,
           entrySpot,
@@ -1595,9 +2069,12 @@ export class DerivBotEngine {
         this.trades = [record, ...this.trades].slice(0, 500);
         this.session = {
           ...this.session,
+          contractStage: this.stopRequested ? 'IS_STOPPING' : 'CONTRACT_CLOSED',
           realTrades: this.session.realTrades + 1,
           realWins: this.session.realWins + (won ? 1 : 0),
           realLosses: this.session.realLosses + (won ? 0 : 1),
+          totalStake: Number((this.session.totalStake + effectiveStake).toFixed(2)),
+          totalPayout: Number((this.session.totalPayout + payout).toFixed(2)),
           totalProfit: total,
         };
 
@@ -1682,6 +2159,7 @@ export class DerivBotEngine {
       this.session = {
         ...this.session,
         status: 'idle',
+        contractStage: 'NOT_RUNNING',
         stoppedReason,
         currentStake: stake,
         martingaleStep: step,
@@ -1698,6 +2176,7 @@ export class DerivBotEngine {
       this.session = {
         ...this.session,
         status: 'error',
+        contractStage: 'NOT_RUNNING',
         errorMessage: msg,
         stoppedReason: msg,
       };

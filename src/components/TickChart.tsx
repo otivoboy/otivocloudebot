@@ -1,5 +1,6 @@
 import React from 'react';
 import { MARKETS, TickPoint } from '../types';
+import { MarketLogo } from './ContractIcons';
 
 interface TickChartProps {
   market: string;
@@ -54,9 +55,12 @@ export const TickChart: React.FC<TickChartProps> = ({ market, ticks }) => {
   return (
     <section className="rounded-xl border border-[#1F2937] bg-[#111827] p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-4 mb-4">
-        <div className="flex items-baseline gap-2.5">
-          <h2 className="text-sm font-semibold text-white">{marketInfo.label}</h2>
-          <span className="font-mono text-xs text-slate-500">{marketInfo.symbol}</span>
+        <div className="flex items-center gap-2.5">
+          <MarketLogo symbol={marketInfo.symbol} />
+          <div className="flex items-baseline gap-2">
+            <h2 className="text-sm font-semibold text-white">{marketInfo.label}</h2>
+            <span className="font-mono text-xs text-slate-500">{marketInfo.symbol}</span>
+          </div>
         </div>
 
         <div className="flex items-baseline gap-3">

@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>OTIVO AI CLOUD</title>
+<style>
+  /* Palette: just three colors — change these to retheme */
+  :root{
+    --bg:#04060f;
+    --c1:#00e5ff;   /* cyan   */
+    --c2:#2f6bff;   /* blue   */
+    --c3:#7b5cff;   /* violet */
+
+    /* Responsive sizing: the logo width drives everything else.
+       Limited by screen width AND height so it fits phones, landscape and big monitors. */
+    --logo-w:clamp(240px,min(86vw,81vh,1100px),1100px);
+    --ring:min(calc(var(--logo-w)*1.15),96vmin);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:#fff;overflow:hidden}
+
+  /* ---------- Your real app goes here ---------- */
+  #app{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;
+       background:radial-gradient(circle at 50% 40%,#0d1330,#04060f 70%);opacity:0}
+  #app h1{font-size:clamp(28px,6vw,56px);margin:0;letter-spacing:.12em}
+  #app p{opacity:.6;margin-top:8px}
+
+  /* ---------- Preloader (transform/opacity only = smooth) ---------- */
+  #preloader{position:fixed;inset:0;z-index:9999;overflow:hidden;contain:strict}
+  .half{position:absolute;left:0;width:100%;height:50.2%;background:var(--bg);will-change:transform}
+  .half.top{top:0}
+  .half.bottom{bottom:0}
+
+  .bg-layer{position:absolute;inset:-5%;pointer-events:none;will-change:transform}
+  /* glows use radial gradients instead of expensive blur filters */
+  .glow{position:absolute;border-radius:50%;will-change:transform}
+  .g1{width:90vmax;height:90vmax;left:-35vmax;top:-35vmax;background:radial-gradient(circle,rgba(123,92,255,.5),transparent 65%)}
+  .g2{width:80vmax;height:80vmax;right:-30vmax;bottom:-30vmax;background:radial-gradient(circle,rgba(0,229,255,.38),transparent 65%)}
+  .g3{width:60vmax;height:60vmax;left:20vw;top:25vh;background:radial-gradient(circle,rgba(47,107,255,.3),transparent 65%)}
+
+  .grid{position:absolute;left:-50%;bottom:-25%;width:200%;height:80%;opacity:.35;
+        background-image:linear-gradient(rgba(0,229,255,.3) 1px,transparent 1px),
+                         linear-gradient(90deg,rgba(0,229,255,.3) 1px,transparent 1px);
+        background-size:clamp(40px,7vmin,96px) clamp(40px,7vmin,96px);transform:perspective(500px) rotateX(62deg)}
+  .grid-fade{position:absolute;inset:0;background:linear-gradient(to bottom,var(--bg) 35%,transparent 80%)}
+
+  .particle{position:absolute;width:5px;height:5px;border-radius:50%;will-change:transform,opacity;opacity:0}
+
+  .stage{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:env(safe-area-inset-top) max(5vw,env(safe-area-inset-right)) env(safe-area-inset-bottom) max(5vw,env(safe-area-inset-left));will-change:transform}
+
+  .logo-wrap{position:relative;width:var(--logo-w);aspect-ratio:7/2.4;display:flex;align-items:center;justify-content:center}
+  .halo{position:absolute;inset:0;margin:auto;width:calc(var(--logo-w)*1.5);height:calc(var(--logo-w)*1.5);max-width:150vmin;max-height:150vmin;border-radius:50%;
+        background:radial-gradient(circle,rgba(0,229,255,.22),rgba(123,92,255,.12) 40%,transparent 68%);will-change:transform,opacity}
+  .ring{position:absolute;inset:0;margin:auto;width:var(--ring);height:var(--ring);
+        pointer-events:none;will-change:transform,opacity}
+  .ring.s2{width:calc(var(--ring)*.84);height:calc(var(--ring)*.84)}
+  .ring.s3{width:calc(var(--ring)*.68);height:calc(var(--ring)*.68)}
+
+  svg.logo{width:100%;height:auto;overflow:visible;position:relative;will-change:transform,opacity}
+  .logo text{font-family:'Arial Black',Gadget,sans-serif;font-size:150px;font-weight:900;letter-spacing:6px}
+  #stroke-text{fill:none;stroke:url(#grad);stroke-width:3.5;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:900;stroke-dashoffset:900}
+  #fill-text{fill:url(#grad);opacity:0}
+
+  .sub{display:flex;gap:.2em;margin-top:clamp(2px,1vh,12px);font-weight:700;letter-spacing:.35em;font-size:clamp(13px,calc(var(--logo-w)*.05),38px);white-space:nowrap}
+  .sub span{display:inline-block;opacity:0;will-change:transform,opacity}
+  .sub .gap{width:.6em}
+
+  .loader{width:clamp(220px,calc(var(--logo-w)*.8),560px);margin-top:clamp(18px,4.5vh,48px);will-change:transform,opacity}
+  .bar{position:relative;height:6px;border-radius:99px;background:rgba(255,255,255,.1);overflow:hidden}
+  .bar-fill{position:absolute;inset:0;transform-origin:left center;transform:scaleX(0);border-radius:99px;
+            background:linear-gradient(90deg,var(--c1),var(--c2),var(--c3));will-change:transform}
+  .bar-shine{position:absolute;top:0;bottom:0;left:0;width:70px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.65),transparent);
+             transform:translateX(-80px);will-change:transform}
+  .meta{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;font-size:clamp(11px,calc(var(--logo-w)*.026),16px);letter-spacing:.08em;color:rgba(255,255,255,.7)}
+  #status{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:12px}
+  #pct{font-variant-numeric:tabular-nums;font-weight:700;font-size:clamp(15px,calc(var(--logo-w)*.04),22px);color:var(--c1)}
+
+  .flash{position:absolute;left:50%;top:50%;width:140vmax;height:140vmax;margin:-70vmax 0 0 -70vmax;border-radius:50%;opacity:0;pointer-events:none;
+         background:radial-gradient(circle,rgba(255,255,255,.9),rgba(0,229,255,.55) 30%,transparent 65%);will-change:transform,opacity}
+
+  /* ---------- Responsive tweaks ---------- */
+  /* Mobile browsers: use the real visible height (address bar aware) */
+  @supports (height:100dvh){
+    :root{--logo-w:clamp(240px,min(86vw,81dvh,1100px),1100px)}
+  }
+  /* Very small phones */
+  @media (max-width:360px){
+    .sub{letter-spacing:.25em}
+    .meta{letter-spacing:.04em}
+  }
+  /* Phones in landscape (short screens): tighten vertical spacing */
+  @media (max-height:480px) and (orientation:landscape){
+    .loader{margin-top:14px}
+    .sub{margin-top:0}
+    .bar{height:5px}
+    .meta{margin-top:8px}
+  }
+  /* Tablets and laptops */
+  @media (min-width:768px){
+    .bar{height:7px}
+  }
+  /* Large monitors / TVs */
+  @media (min-width:1600px){
+    .bar{height:9px}
+    .meta{margin-top:16px}
+  }
+</style>
+</head>
+<body>
+
+  <!-- Your app -->
+  <div id="app">
+    <h1>OTIVO AI CLOUD</h1>
+    <p>Welcome back — your app loads here.</p>
+  </div>
+
+  <!-- Preloader -->
+  <div id="preloader" role="status" aria-label="Loading OTIVO AI CLOUD">
+    <div class="half top"></div>
+    <div class="half bottom"></div>
+
+    <div class="bg-layer" id="bgLayer">
+      <div class="glow g1"></div>
+      <div class="glow g2"></div>
+      <div class="glow g3"></div>
+      <div class="grid"></div>
+      <div class="grid-fade"></div>
+      <div id="particles"></div>
+    </div>
+
+    <div class="stage" id="stage">
+      <div class="logo-wrap">
+        <div class="halo" id="halo"></div>
+
+        <!-- each ring is its own element so the GPU can rotate it cheaply -->
+        <svg class="ring" id="r1" viewBox="0 0 100 100"><circle cx="50" cy="50" r="48" fill="none" stroke="#00e5ff" stroke-width=".35" stroke-dasharray="18 8 3 8" stroke-linecap="round"/></svg>
+        <svg class="ring s2" id="r2" viewBox="0 0 100 100"><circle cx="50" cy="50" r="48" fill="none" stroke="#7b5cff" stroke-width=".3" stroke-dasharray="1 3" stroke-linecap="round"/></svg>
+        <svg class="ring s3" id="r3" viewBox="0 0 100 100"><circle cx="50" cy="50" r="48" fill="none" stroke="#2f6bff" stroke-width=".4" stroke-dasharray="30 12" stroke-linecap="round"/></svg>
+
+        <svg class="logo" viewBox="0 0 700 200" id="logo">
+          <defs>
+            <linearGradient id="grad" gradientUnits="userSpaceOnUse" x1="120" y1="0" x2="580" y2="0">
+              <stop offset="0" stop-color="#00e5ff"/>
+              <stop offset=".5" stop-color="#2f6bff"/>
+              <stop offset="1" stop-color="#7b5cff"/>
+            </linearGradient>
+          </defs>
+          <text id="fill-text" x="350" y="105" text-anchor="middle" dominant-baseline="middle">OTIVO</text>
+          <text id="stroke-text" x="350" y="105" text-anchor="middle" dominant-baseline="middle">OTIVO</text>
+        </svg>
+      </div>
+
+      <div class="sub" id="sub" aria-hidden="true"></div>
+
+      <div class="loader" id="loader">
+        <div class="bar"><div class="bar-fill" id="barFill"></div><div class="bar-shine" id="barShine"></div></div>
+        <div class="meta"><span id="status">Initializing neural core…</span><span id="pct">0%</span></div>
+      </div>
+    </div>
+
+    <div class="flash" id="flash"></div>
+  </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script>
+(() => {
+  const MIN_TIME = 3.6;                       // minimum seconds on screen
+  const colors = ['#00e5ff', '#2f6bff', '#7b5cff'];
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const $ = s => document.querySelector(s);
+
+  gsap.config({ force3D: true });
+  gsap.ticker.lagSmoothing(0);               // no jumps after a slow frame
+
+  // ---------- "AI CLOUD" letters ----------
+  const sub = $('#sub');
+  'AI CLOUD'.split('').forEach((ch, i) => {
+    const s = document.createElement('span');
+    if (ch === ' ') s.className = 'gap';
+    else { s.textContent = ch; s.style.color = i < 2 ? colors[0] : colors[(i % 2) + 1]; }
+    sub.appendChild(s);
+  });
+
+  // ---------- Light particle field (few, flat, GPU-moved) ----------
+  const pWrap = $('#particles');
+  const count = reduce ? 0 : (innerWidth < 600 ? 12 : innerWidth < 1400 ? 22 : 32);
+  for (let i = 0; i < count; i++) {
+    const p = document.createElement('div');
+    p.className = 'particle';
+    p.style.left = gsap.utils.random(0, 100) + '%';
+    p.style.top = gsap.utils.random(20, 100) + '%';
+    p.style.background = gsap.utils.random(colors);
+    const sc = gsap.utils.random(.5, 1.4);
+    gsap.set(p, { scale: sc });
+    gsap.to(p, { y: -gsap.utils.random(140, 320), opacity: gsap.utils.random(.35, .9),
+      duration: gsap.utils.random(4, 8), repeat: -1, ease: 'sine.inOut', yoyo: true, delay: gsap.utils.random(0, 3) });
+  }
+
+  // ---------- Ambient motion (transform only) ----------
+  gsap.to('.g1', { x: '18vw', y: '10vh', duration: 8, repeat: -1, yoyo: true, ease: 'sine.inOut' });
+  gsap.to('.g2', { x: '-16vw', y: '-8vh', duration: 9, repeat: -1, yoyo: true, ease: 'sine.inOut' });
+  gsap.to('.g3', { scale: 1.25, duration: 5, repeat: -1, yoyo: true, ease: 'sine.inOut' });
+  gsap.to('#r1', { rotation: 360, duration: 16, repeat: -1, ease: 'none' });
+  gsap.to('#r2', { rotation: -360, duration: 24, repeat: -1, ease: 'none' });
+  gsap.to('#r3', { rotation: 360, duration: 10, repeat: -1, ease: 'none' });
+  gsap.to('#halo', { scale: 1.12, opacity: .75, duration: 2.2, repeat: -1, yoyo: true, ease: 'sine.inOut' });
+  gsap.to('#logo', { y: -5, duration: 2.4, repeat: -1, yoyo: true, ease: 'sine.inOut' });
+  gsap.to('#barShine', { x: () => $('.bar').offsetWidth + 80, duration: 1.3, repeat: -1, repeatDelay: .5, ease: 'power1.inOut' });
+
+  // gentle parallax
+  if (!reduce && matchMedia('(pointer:fine)').matches) {
+    const qx = gsap.quickTo('#stage', 'x', { duration: .9, ease: 'power3' });
+    const qy = gsap.quickTo('#stage', 'y', { duration: .9, ease: 'power3' });
+    const bx = gsap.quickTo('#bgLayer', 'x', { duration: 1.3, ease: 'power3' });
+    const by = gsap.quickTo('#bgLayer', 'y', { duration: 1.3, ease: 'power3' });
+    addEventListener('pointermove', e => {
+      const nx = e.clientX / innerWidth - .5, ny = e.clientY / innerHeight - .5;
+      qx(nx * 14); qy(ny * 14); bx(nx * -26); by(ny * -26);
+    }, { passive: true });
+  }
+
+  // ---------- Intro ----------
+  const intro = gsap.timeline({ defaults: { ease: 'power3.out' } });
+  intro
+    .from('.ring', { scale: .3, opacity: 0, duration: 1.1, stagger: .12 }, 0)
+    .from('#halo', { scale: .4, opacity: 0, duration: 1.4 }, 0)
+    .to('#stroke-text', { strokeDashoffset: 0, duration: 1.9, ease: 'power2.inOut' }, .2)
+    .to('#fill-text', { opacity: 1, duration: .9, ease: 'power2.out' }, 1.5)
+    .to('#stroke-text', { opacity: 0, duration: .6 }, 1.8)
+    .fromTo('#logo', { scale: .96 }, { scale: 1, duration: .9, ease: 'back.out(2)' }, 1.5)
+    .fromTo('#sub span', { y: 22, opacity: 0 }, { y: 0, opacity: 1, duration: .55, stagger: .06 }, 1.8)
+    .from('#loader', { y: 16, opacity: 0, duration: .7 }, 1.2);
+
+  // ---------- Progress ----------
+  const messages = [
+    [0,  'Initializing neural core…'],
+    [25, 'Connecting to OTIVO cloud…'],
+    [50, 'Syncing live market data…'],
+    [75, 'Warming up AI engine…'],
+    [93, 'Almost there…'],
+    [100,'Ready!']
+  ];
+  const state = { v: 0 };
+  const pct = $('#pct'), status = $('#status'), fill = $('#barFill');
+  let shownPct = -1, msgIndex = -1;
+
+  function render() {
+    const v = Math.round(state.v);
+    fill.style.transform = `scaleX(${state.v / 100})`;     // cheap, no gsap.set per frame
+    if (v === shownPct) return;
+    shownPct = v;
+    pct.textContent = v + '%';
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (v >= messages[i][0]) {
+        if (i !== msgIndex) { msgIndex = i; status.textContent = messages[i][1]; }
+        break;
+      }
+    }
+  }
+
+  const crawl = gsap.to(state, { v: 90, duration: MIN_TIME, ease: 'power2.inOut', onUpdate: render, onComplete: maybeFinish });
+  let pageLoaded = document.readyState === 'complete';
+  if (!pageLoaded) addEventListener('load', () => { pageLoaded = true; maybeFinish(); });
+
+  let finishing = false;
+  function maybeFinish() {
+    if (finishing || !pageLoaded || crawl.progress() < 1) return;
+    finishing = true;
+    gsap.to(state, { v: 100, duration: .6, ease: 'power2.out', onUpdate: render, onComplete: exit });
+  }
+
+  // ---------- Exit ----------
+  function exit() {
+    const app = $('#app');
+    gsap.timeline({ onComplete: () => {
+        $('#preloader').remove();
+        document.body.style.overflow = '';
+        window.dispatchEvent(new CustomEvent('otivo:loaded'));
+      }})
+      .to('#loader', { y: 16, opacity: 0, duration: .35, ease: 'power2.in' })
+      .to('#sub span', { y: -14, opacity: 0, stagger: .025, duration: .25 }, '<')
+      .fromTo('#flash', { scale: .05, opacity: .9 }, { scale: 1, opacity: 0, duration: .9, ease: 'power2.out' }, '>-0.05')
+      .to('#logo', { scale: 1.35, opacity: 0, duration: .6, ease: 'power3.in' }, '<')
+      .to(['.ring', '#halo'], { scale: 1.6, opacity: 0, duration: .6, ease: 'power3.in' }, '<')
+      .to('#bgLayer', { opacity: 0, duration: .45 }, '<.15')
+      .set(app, { opacity: 1 })
+      .to('.half.top', { yPercent: -100, duration: .85, ease: 'expo.inOut' }, '>-0.1')
+      .to('.half.bottom', { yPercent: 100, duration: .85, ease: 'expo.inOut' }, '<')
+      .from(app.children, { y: 26, opacity: 0, stagger: .1, duration: .6, ease: 'power3.out' }, '<.3');
+  }
+
+  document.body.style.overflow = 'hidden';
+  if (reduce) gsap.globalTimeline.timeScale(3);
+})();
+</script>
+</body>
+</html>

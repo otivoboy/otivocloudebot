@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Download, Search } from 'lucide-react';
 import { TradeRecord } from '../types';
+import { ContractIcon, MarketLogo } from './ContractIcons';
 
 interface TradeLedgerTableProps {
   trades: TradeRecord[];
@@ -175,15 +176,21 @@ export const TradeLedgerTable: React.FC<TradeLedgerTableProps> = ({
                     </span>
                   </td>
                   <td className="px-3 py-2 text-slate-300 whitespace-nowrap">
-                    {t.marketLabel}
+                    <div className="flex items-center gap-2">
+                      <MarketLogo symbol={t.market} className="w-6 h-6" />
+                      <span>{t.marketLabel}</span>
+                    </div>
                   </td>
                   <td className="px-3 py-2 font-medium text-white whitespace-nowrap">
-                    {t.label}
-                    {t.martingaleStep > 0 && (
-                      <span className="ml-1.5 font-mono text-[11px] text-slate-400">
-                        M{t.martingaleStep}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      <ContractIcon type={t.contractType} className="w-5 h-5" />
+                      <span>{t.label}</span>
+                      {t.martingaleStep > 0 && (
+                        <span className="font-mono text-[11px] text-slate-400">
+                          M{t.martingaleStep}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2 text-right font-mono text-slate-300 tabular-nums whitespace-nowrap">
                     {t.stake.toFixed(2)} {t.currency}

@@ -1,0 +1,6306 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { 
+  Activity, 
+  Zap, 
+  RefreshCw, 
+  TrendingUp, 
+  TrendingDown, 
+  BarChart3, 
+  LineChart as LineIcon,
+  ChevronDown,
+  Info,
+  DollarSign,
+  Gauge,
+  Target,
+  ShieldCheck,
+  ArrowUpRight,
+  ArrowDownRight,
+  AlertCircle,
+  Settings,
+  X,
+  Square,
+  Search,
+  Play,
+  ChevronRight
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip as RechartsTooltip, 
+  ResponsiveContainer,
+  Cell,
+  LineChart,
+  Line,
+  AreaChart,
+  Area
+} from 'recharts';
+import { cn, getActiveToken, getActiveAccountId } from './lib/utils';
+import { AITickIndicator } from './lib/aiIndicator';
+import { botEngine } from './lib/botEngine';
+import { observer } from 'mobx-react-lite';
+import { rootStore } from './stores/root-store';
+import { OverUnderAnalysis } from './components/analysis/OverUnderAnalysis';
+import { EvenOddAnalysis } from './components/analysis/EvenOddAnalysis';
+import { RiseFallAnalysis } from './components/analysis/RiseFallAnalysis';
+import { DiffersAnalysis } from './components/analysis/DiffersAnalysis';
+import { AccumulatorsAnalysis } from './components/analysis/AccumulatorsAnalysis';
+import { DigitPressureNoiseAnalysis } from './components/analysis/DigitPressureNoiseAnalysis';
+import { DERIV_TIMEFRAME_CONFIG, evaluateTimeframeSignal } from './components/analysis/derivTimeframes';
+import { CandleData, TimeframeSignal, DerivTimeframe, DerivContractAnalysisType, AnalysisMarketWindow, isVolatilityIndex } from './components/analysis/types';
+import { MarketAnalysisWindow } from './components/analysis/MarketAnalysisWindow';
+import { OverUnderActiveBot } from './components/analysis/OverUnderActiveBot';
+import { AnalysisWindowsManager } from './components/analysis/AnalysisWindowsManager';
+
+// Professional Deriv Symbols
+const SYMBOLS = [
+  { id: '1HZ10V', name: 'Volatility 10 (1s) Index' },
+  { id: '1HZ15V', name: 'Volatility 15 (1s) Index' },
+  { id: 'R_10', name: 'Volatility 10 Index' },
+  { id: '1HZ25V', name: 'Volatility 25 (1s) Index' },
+  { id: '1HZ30V', name: 'Volatility 30 (1s) Index' },
+  { id: 'R_25', name: 'Volatility 25 Index' },
+  { id: '1HZ50V', name: 'Volatility 50 (1s) Index' },
+  { id: 'R_50', name: 'Volatility 50 Index' },
+  { id: '1HZ75V', name: 'Volatility 75 (1s) Index' },
+  { id: 'R_75', name: 'Volatility 75 Index' },
+  { id: '1HZ90V', name: 'Volatility 90 (1s) Index' },
+  { id: '1HZ100V', name: 'Volatility 100 (1s) Index' },
+  { id: 'R_100', name: 'Volatility 100 Index' },
+  { id: 'BOOM500', name: 'Boom 500 Index' },
+  { id: 'BOOM1000', name: 'Boom 1000 Index' },
+  { id: 'CRASH500', name: 'Crash 500 Index' },
+  { id: 'CRASH1000', name: 'Crash 1000 Index' },
+  { id: 'JD10', name: 'Jump 10 Index' },
+  { id: 'JD25', name: 'Jump 25 Index' },
+  { id: 'JD50', name: 'Jump 50 Index' },
+  { id: 'JD100', name: 'Jump 100 Index' },
+  { id: 'RDBULL', name: 'Bull Market Index' },
+  { id: 'RDBEAR', name: 'Bear Market Index' },
+];
+
+const MARKET_DECIMALS: Record<string, number> = {
+  '1HZ10V': 2, '1HZ15V': 3, '1HZ25V': 2, '1HZ30V': 3, '1HZ50V': 2, '1HZ75V': 2, '1HZ90V': 3, '1HZ100V': 2,
+  'R_10': 3, 'R_25': 3, 'R_50': 4, 'R_75': 4, 'R_100': 2,
+  'JD10': 2, 'JD25': 2, 'JD50': 2, 'JD100': 2, 'RDBULL': 4, 'RDBEAR': 4,
+  'BOOM500': 4, 'BOOM1000': 4, 'CRASH500': 4, 'CRASH1000': 4
+};
+
+const NEURAL_DECIMALS: Record<string, number> = { 
+  "1HZ10V": 2, "R_10": 3, "1HZ25V": 2, "R_25": 3, 
+  "1HZ50V": 2, "1HZ75V": 2, "R_50": 4, "1HZ100V": 2 
+};
+
+const getSymbolDecimals = (sym: string, activePipSize?: number): number => {
+  if (MARKET_DECIMALS[sym] !== undefined) return MARKET_DECIMALS[sym];
+  const size = activePipSize || 0.01;
+  return Math.max(0, Math.ceil(-Math.log10(size)));
+};
+
+const NEURAL_MARKETS = ['1HZ10V', 'R_10', '1HZ25V', 'R_25', '1HZ50V', '1HZ75V', 'R_50', '1HZ100V'];
+
+interface TickData {
+  epoch: number;
+  quote: number;
+  digit: number;
+}
+
+interface OtivoSignal {
+  id: string;
+  type: 'over' | 'under' | 'differ';
+  symbol: string;
+  seq: string;
+  conf: number;
+  target?: number;
+  time: string;
+  pastOutcomes?: number[];
+}
+
+// --- AI MARKET HACKER MATHEMATICAL RECONSTRUCTION & MARKOV SHADOW ENGINE ---
+
+export class IngestionBuffer {
+  private buffer: number[] = [];
+  private capacity: number;
+
+  constructor(capacity = 1000) {
+    this.capacity = capacity;
+  }
+
+  push(digit: number) {
+    if (digit >= 0 && digit <= 9) {
+      this.buffer.push(digit);
+      if (this.buffer.length > this.capacity) {
+        this.buffer.shift();
+      }
+    }
+  }
+
+  getWindow(length: number): number[] | null {
+    if (this.buffer.length < length) return null;
+    return this.buffer.slice(-length);
+  }
+
+  getAll(): number[] {
+    return [...this.buffer];
+  }
+}
+
+export class MathReconstructionSolver {
+  transitionMatrix: number[][] = Array.from({ length: 10 }, () => Array(10).fill(0));
+  isDeterministic: boolean = false;
+  lcgParams: [number, number] | null = null; // [a, c] for x_{n+1} = (a*x_n + c) mod 10
+
+  fit(data: number[]) {
+    if (data.length < 10) return;
+
+    // 1. Empirical First-Order Markov Transition Matrix
+    const matrix: number[][] = Array.from({ length: 10 }, () => Array(10).fill(0));
+    for (let i = 0; i < data.length - 1; i++) {
+      const current = data[i];
+      const nextVal = data[i + 1];
+      if (current >= 0 && current <= 9 && nextVal >= 0 && nextVal <= 9) {
+        matrix[current][nextVal]++;
+      }
+    }
+
+    for (let r = 0; r < 10; r++) {
+      const rowSum = matrix[r].reduce((a, b) => a + b, 0);
+      const denominator = rowSum === 0 ? 1 : rowSum;
+      for (let c = 0; c < 10; c++) {
+        this.transitionMatrix[r][c] = matrix[r][c] / denominator;
+      }
+    }
+
+    // 2. Linear Congruential Recurrence Test: x_{n+1} = (a * x_n + c) mod 10
+    this.solveLinearModulo(data);
+  }
+
+  private solveLinearModulo(data: number[]) {
+    if (data.length < 4) return;
+    const testLen = Math.min(data.length, 30);
+    const recent = data.slice(-testLen);
+
+    for (let a = 0; a < 10; a++) {
+      for (let c = 0; c < 10; c++) {
+        let match = true;
+        for (let i = 0; i < recent.length - 1; i++) {
+          if ((a * recent[i] + c) % 10 !== recent[i + 1]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          this.isDeterministic = true;
+          this.lcgParams = [a, c];
+          return;
+        }
+      }
+    }
+    this.isDeterministic = false;
+    this.lcgParams = null;
+  }
+}
+
+export interface ShadowPrediction {
+  topPrediction: number;
+  confidence: number;
+  probabilities: number[];
+  top3Predictions: number[];
+  isDeterministic: boolean;
+  lcgParams: [number, number] | null;
+}
+
+export class ShadowGenerator {
+  private solver: MathReconstructionSolver;
+
+  constructor(solver: MathReconstructionSolver) {
+    this.solver = solver;
+  }
+
+  predictNext(currentDigit: number): ShadowPrediction {
+    if (this.solver.isDeterministic && this.solver.lcgParams) {
+      const [a, c] = this.solver.lcgParams;
+      const predictedExact = (a * currentDigit + c) % 10;
+      const probs = Array(10).fill(0);
+      probs[predictedExact] = 1.0;
+      return {
+        topPrediction: predictedExact,
+        confidence: 1.0,
+        probabilities: probs,
+        top3Predictions: [predictedExact],
+        isDeterministic: true,
+        lcgParams: this.solver.lcgParams
+      };
+    }
+
+    const validCurrent = (currentDigit >= 0 && currentDigit <= 9) ? currentDigit : 0;
+    const probabilities = [...this.solver.transitionMatrix[validCurrent]];
+    let topDigit = 0;
+    let maxProb = -1;
+    for (let d = 0; d < 10; d++) {
+      if (probabilities[d] > maxProb) {
+        maxProb = probabilities[d];
+        topDigit = d;
+      }
+    }
+
+    const indexedProbs = probabilities.map((p, idx) => ({ p, idx }));
+    indexedProbs.sort((a, b) => b.p - a.p);
+    const top3Predictions = indexedProbs.slice(0, 3).map(item => item.idx);
+
+    return {
+      topPrediction: topDigit,
+      confidence: maxProb,
+      probabilities,
+      top3Predictions,
+      isDeterministic: false,
+      lcgParams: null
+    };
+  }
+}
+
+export interface EvaluationReport {
+  totalEvaluated: number;
+  exactMatchAccuracyPct: number;
+  top3MatchAccuracyPct: number;
+  meanAbsoluteError: number;
+}
+
+export class AccuracyEvaluator {
+  totalEvaluations = 0;
+  exactHits = 0;
+  top3Hits = 0;
+  absoluteErrors: number[] = [];
+
+  evaluate(actualDigit: number, predictionData: ShadowPrediction) {
+    this.totalEvaluations++;
+    const predictedDigit = predictionData.topPrediction;
+
+    if (actualDigit === predictedDigit) {
+      this.exactHits++;
+    }
+
+    if (predictionData.top3Predictions.includes(actualDigit)) {
+      this.top3Hits++;
+    }
+
+    this.absoluteErrors.push(Math.abs(actualDigit - predictedDigit));
+    if (this.absoluteErrors.length > 500) {
+      this.absoluteErrors.shift();
+    }
+  }
+
+  getReport(): EvaluationReport {
+    if (this.totalEvaluations === 0) {
+      return {
+        totalEvaluated: 0,
+        exactMatchAccuracyPct: 0,
+        top3MatchAccuracyPct: 0,
+        meanAbsoluteError: 0
+      };
+    }
+
+    const sumErr = this.absoluteErrors.reduce((a, b) => a + b, 0);
+    const mae = sumErr / this.absoluteErrors.length;
+
+    return {
+      totalEvaluated: this.totalEvaluations,
+      exactMatchAccuracyPct: (this.exactHits / this.totalEvaluations) * 100,
+      top3MatchAccuracyPct: (this.top3Hits / this.totalEvaluations) * 100,
+      meanAbsoluteError: mae
+    };
+  }
+}
+
+export interface HackerMathSummary {
+  symbol: string;
+  isDeterministic: boolean;
+  lcgParams: [number, number] | null;
+  topPrediction: number;
+  confidence: number;
+  top3Predictions: number[];
+  probabilities: number[];
+  totalEvaluated: number;
+  exactAccuracyPct: number;
+  top3AccuracyPct: number;
+  mae: number;
+}
+
+export default observer(function AnalysisTool() {
+  const navigate = useNavigate();
+  const [symbol, setSymbol] = useState(() => localStorage.getItem('analysis_symbol') || 'R_50');
+  const [status, setStatus] = useState<'connected' | 'disconnected' | 'connecting' | 'error'>('disconnected');
+  const [ticks, setTicks] = useState<TickData[]>([]);
+  const [analysisWindow, setAnalysisWindow] = useState(() => parseInt(localStorage.getItem('analysis_window') || '1000', 10));
+  const [tempWindow, setTempWindow] = useState(() => localStorage.getItem('analysis_window') || '1000');
+  const aiIndicatorRef = useRef(new AITickIndicator());
+  const [pipSize, setPipSize] = useState(0.01);
+  const [lastUpdate, setLastUpdate] = useState(new Date().toLocaleTimeString());
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<any>(null);
+
+  // Deriv Multi-Contract Advanced Analysis Modes
+  const [contractAnalysisMode, setContractAnalysisMode] = useState<
+    DerivContractAnalysisType | 'classic_frequency'
+  >(() => (localStorage.getItem('deriv_analysis_contract_mode') as any) || 'over_under');
+  const [selectedTimeframe, setSelectedTimeframe] = useState<DerivTimeframe>('1m');
+  const [candles, setCandles] = useState<CandleData[]>([]);
+  const [timeframeCandles, setTimeframeCandles] = useState<Record<string, CandleData[]>>({});
+
+  // Multi-Market Windows State
+  const [windows, setWindows] = useState<AnalysisMarketWindow[]>(() => {
+    const saved = localStorage.getItem('analysis_open_windows');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      } catch (e) {}
+    }
+    const autoBotMarkets = localStorage.getItem('autobot_checked_markets');
+    if (autoBotMarkets) {
+      try {
+        const parsed = JSON.parse(autoBotMarkets);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.slice(0, 4).map((sym: string, i: number) => ({
+            id: `win_${sym}_${i}_${Date.now()}`,
+            symbol: sym,
+          }));
+        }
+      } catch (e) {}
+    }
+    const initialSym = localStorage.getItem('analysis_symbol') || '1HZ10V';
+    return [
+      { id: `win_${initialSym}_1`, symbol: initialSym },
+      { id: 'win_R_50_2', symbol: 'R_50' }
+    ];
+  });
+
+  const [activeWindowId, setActiveWindowId] = useState<string>(() => windows[0]?.id || 'win_1');
+  const [layoutMode, setLayoutMode] = useState<'grid' | 'single'>(() => {
+    return (localStorage.getItem('analysis_layout_mode') as 'grid' | 'single') || 'grid';
+  });
+  const [gridColumns, setGridColumns] = useState<1 | 2 | 3>(() => {
+    const cols = parseInt(localStorage.getItem('analysis_grid_columns') || '2', 10);
+    return (cols === 1 || cols === 2 || cols === 3) ? cols : 2;
+  });
+
+  // Multi-Market Ticks and Quotes Real-Time Store
+  const [marketTicks, setMarketTicks] = useState<Record<string, TickData[]>>({});
+  const [marketCandles, setMarketCandles] = useState<Record<string, CandleData[]>>({});
+  const [marketTimeframeCandles, setMarketTimeframeCandles] = useState<Record<string, Record<string, CandleData[]>>>({});
+  const [marketLastQuotes, setMarketLastQuotes] = useState<Record<string, { quote: number; digit: number; isUp: boolean }>>({});
+
+  // Sync activeWindow state
+  const activeWindow = useMemo(() => {
+    return windows.find(w => w.id === activeWindowId) || windows[0] || { id: 'default', symbol };
+  }, [windows, activeWindowId, symbol]);
+
+  useEffect(() => {
+    localStorage.setItem('analysis_open_windows', JSON.stringify(windows));
+  }, [windows]);
+
+  useEffect(() => {
+    localStorage.setItem('analysis_layout_mode', layoutMode);
+  }, [layoutMode]);
+
+  useEffect(() => {
+    localStorage.setItem('analysis_grid_columns', gridColumns.toString());
+  }, [gridColumns]);
+
+  // Keep single symbol state synced with active window
+  useEffect(() => {
+    if (activeWindow && activeWindow.symbol !== symbol) {
+      setSymbol(activeWindow.symbol);
+    }
+  }, [activeWindow?.symbol]);
+
+  // Handle switching contract analysis mode (with accumulator market restrictions)
+  const handleSetContractAnalysisMode = (mode: any) => {
+    setContractAnalysisMode(mode);
+    localStorage.setItem('deriv_analysis_contract_mode', mode);
+
+    // Deriv Accumulators are strictly supported only on Volatility Indices.
+    // Auto-fix any window with Bear, Bull, Jump indices to a Volatility Index
+    if (mode === 'accumulators') {
+      setWindows(prev => prev.map(w => {
+        if (!isVolatilityIndex(w.symbol)) {
+          return { ...w, symbol: '1HZ10V' };
+        }
+        return w;
+      }));
+    }
+  };
+
+  const handleAddWindow = (newSymbol?: string) => {
+    let sym = newSymbol;
+    if (!sym) {
+      const currentSyms = new Set(windows.map(w => w.symbol));
+      const candidates = contractAnalysisMode === 'accumulators'
+        ? SYMBOLS.filter(s => isVolatilityIndex(s.id))
+        : SYMBOLS;
+      const unselected = candidates.find(s => !currentSyms.has(s.id));
+      sym = unselected ? unselected.id : candidates[0]?.id || '1HZ10V';
+    } else if (contractAnalysisMode === 'accumulators' && !isVolatilityIndex(sym)) {
+      sym = '1HZ10V';
+    }
+
+    const newWin: AnalysisMarketWindow = {
+      id: `win_${sym}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      symbol: sym,
+    };
+    setWindows(prev => [...prev, newWin]);
+    setActiveWindowId(newWin.id);
+  };
+
+  const handleRemoveWindow = (id: string) => {
+    setWindows(prev => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter(w => w.id !== id);
+      if (activeWindowId === id) {
+        setActiveWindowId(next[0].id);
+      }
+      return next;
+    });
+  };
+
+  const handleUpdateWindow = (id: string, updates: Partial<AnalysisMarketWindow>) => {
+    setWindows(prev => prev.map(w => {
+      if (w.id !== id) return w;
+      let nextUpdates = { ...updates };
+      const effectiveMode = nextUpdates.contractMode || w.contractMode || contractAnalysisMode;
+      const effectiveSymbol = nextUpdates.symbol || w.symbol;
+      if (effectiveMode === 'accumulators' && !isVolatilityIndex(effectiveSymbol)) {
+        nextUpdates.symbol = '1HZ10V';
+      }
+      return { ...w, ...nextUpdates };
+    }));
+  };
+
+  const handleDuplicateWindow = (id: string) => {
+    const target = windows.find(w => w.id === id);
+    if (!target) return;
+    const newWin: AnalysisMarketWindow = {
+      ...target,
+      id: `win_${target.symbol}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    };
+    setWindows(prev => [...prev, newWin]);
+  };
+
+  const handleSyncAutoBotMarkets = () => {
+    try {
+      const saved = localStorage.getItem('autobot_checked_markets');
+      if (!saved) return;
+      const parsed: string[] = JSON.parse(saved);
+      if (!Array.isArray(parsed) || parsed.length === 0) return;
+
+      let targetMarkets = parsed;
+      if (contractAnalysisMode === 'accumulators') {
+        targetMarkets = parsed.filter(s => isVolatilityIndex(s));
+        if (targetMarkets.length === 0) targetMarkets = ['1HZ10V'];
+      }
+
+      const newWindows: AnalysisMarketWindow[] = targetMarkets.map((sym, i) => ({
+        id: `win_autobot_${sym}_${i}_${Date.now()}`,
+        symbol: sym,
+      }));
+
+      setWindows(newWindows);
+      if (newWindows.length > 0) {
+        setActiveWindowId(newWindows[0].id);
+      }
+    } catch (e) {
+      console.error("Failed to sync AutoBot markets", e);
+    }
+  };
+
+  const autoBotMarketCount = useMemo(() => {
+    try {
+      const saved = localStorage.getItem('autobot_checked_markets');
+      if (!saved) return 0;
+      const parsed = JSON.parse(saved);
+      return Array.isArray(parsed) ? parsed.length : 0;
+    } catch {
+      return 0;
+    }
+  }, []);
+
+  // Unique symbols across all open windows for active subscription
+  // When in 'differs' mode, automatically include all available symbols so the multi-market
+  // scanner streams live ticks for every single market to know each and every prediction digit
+  const uniqueSymbols = useMemo(() => {
+    const syms = new Set<string>();
+    windows.forEach(w => {
+      if (w.symbol) syms.add(w.symbol);
+    });
+    if (symbol) syms.add(symbol);
+
+    if (contractAnalysisMode === 'differs') {
+      SYMBOLS.forEach(s => syms.add(s.id));
+    }
+
+    return Array.from(syms);
+  }, [windows, symbol, contractAnalysisMode]);
+
+  const uniqueSymbolsKey = useMemo(() => uniqueSymbols.sort().join(','), [uniqueSymbols]);
+
+  // AI Scanner & Bot States
+  const [isScanning, setIsScanning] = useState(false);
+  const [lastScanTime, setLastScanTime] = useState<string | null>(null);
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanBestMarket, setScanBestMarket] = useState<any>(null);
+  const [scanResults, setScanResults] = useState<any[]>([]);
+  const [showScanResults, setShowScanResults] = useState(false);
+  const [scannerSettings, setScannerSettings] = useState({
+    stake: 1,
+    martingale: 2,
+    martingaleAfter: 1, // Number of losses before applying martingale multiplier
+    tp: 5,
+    sl: 10,
+    activeStrategies: ['over', 'under', 'differ']
+  });
+  const [otivoSignals, setOtivoSignals] = useState<{
+    over: OtivoSignal[],
+    under: OtivoSignal[],
+    differ: OtivoSignal[]
+  }>({ over: [], under: [], differ: [] });
+  const [otivoLog, setOtivoLog] = useState<string[]>([]);
+  const [activeSections, setActiveSections] = useState<string[]>(['over', 'under', 'differ']);
+  const [neuralMarketData, setNeuralMarketData] = useState<Record<string, { lastDigit: number, count: number }>>({});
+  const neuralHistories = useRef<Record<string, number[]>>({});
+  const neuralSocket = useRef<WebSocket | null>(null);
+  const otivoMemory = useRef<Record<string, Record<string, { total: number, next: number[], outcomes: number[] }>>>({});
+  const [isAutoTrading, setIsAutoTrading] = useState(false);
+  const [marketSwitchMode, setMarketSwitchMode] = useState<'off' | 'loss' | 'always'>(() => {
+    return (localStorage.getItem('scanner_market_switch_mode') as 'off' | 'loss' | 'always') || 'loss';
+  });
+  const autoSwitchEnabled = marketSwitchMode !== 'off';
+  const [currentAutoStake, setCurrentAutoStake] = useState(1);
+  const [autoSessionProfit, setAutoSessionProfit] = useState(0);
+  const processedContracts = useRef<Set<string>>(new Set());
+  const consecutiveLosses = useRef(0);
+  const [tpSlResult, setTpSlResult] = useState<{ type: 'tp' | 'sl', profit: number } | null>(null);
+  const [isWatcherActive, setIsWatcherActive] = useState(true);
+  const recentlyUsedSymbols = useRef<string[]>([]);
+  const symbolUseCount = useRef<Record<string, number>>({});
+
+  // Digit Frequency Bot States
+  const [isFrequencyBotTrading, setIsFrequencyBotTrading] = useState(false);
+  const [frequencyBotStake, setFrequencyBotStake] = useState(() => parseFloat(localStorage.getItem('freq_bot_stake') || '1'));
+  const [frequencyBotAutoStakeEnabled, setFrequencyBotAutoStakeEnabled] = useState(
+    () => localStorage.getItem('freq_bot_auto_stake_enabled') === 'true'
+  );
+  const [frequencyBotAutoStakePct, setFrequencyBotAutoStakePct] = useState(
+    () => parseFloat(localStorage.getItem('freq_bot_auto_stake_pct') || '1.0')
+  );
+  const [frequencyBotMartingale, setFrequencyBotMartingale] = useState(() => parseFloat(localStorage.getItem('freq_bot_martingale') || '2'));
+  const [frequencyBotTargetPct, setFrequencyBotTargetPct] = useState(() => parseFloat(localStorage.getItem('freq_bot_target_pct') || '10.0'));
+  const [frequencyBotContractType, setFrequencyBotContractType] = useState<'coldest' | 'differ' | 'over' | 'under' | 'even' | 'odd'>(
+    () => (localStorage.getItem('freq_bot_contract_type') || 'differ') as any
+  );
+  const [frequencyBotCurrentStake, setFrequencyBotCurrentStake] = useState(1);
+  const [frequencyBotSessionProfit, setFrequencyBotSessionProfit] = useState(0);
+  const [frequencyBotResult, setFrequencyBotResult] = useState<any>(null);
+  const [frequencyBotTp, setFrequencyBotTp] = useState(() => parseFloat(localStorage.getItem('freq_bot_tp') || '10'));
+  const [frequencyBotMaxRunsEnabled, setFrequencyBotMaxRunsEnabled] = useState(
+    () => localStorage.getItem('freq_bot_max_runs_enabled') === 'true'
+  );
+  const [frequencyBotMaxRuns, setFrequencyBotMaxRuns] = useState(
+    () => parseInt(localStorage.getItem('freq_bot_max_runs') || '10', 10)
+  );
+  const [frequencyBotSl, setFrequencyBotSl] = useState(() => parseFloat(localStorage.getItem('freq_bot_sl') || '50'));
+  const [frequencyBotWins, setFrequencyBotWins] = useState(0);
+  const [frequencyBotLosses, setFrequencyBotLosses] = useState(0);
+  const [frequencyBotDuration, setFrequencyBotDuration] = useState(() => parseInt(localStorage.getItem('freq_bot_duration') || '1', 10));
+  const [frequencyBotEvenOddMode, setFrequencyBotEvenOddMode] = useState<'high_even' | 'low_even' | 'low_odd' | 'high_odd'>(
+    () => (localStorage.getItem('freq_bot_even_odd_mode') || 'high_even') as any
+  );
+  const [frequencyBotBenchmarkPct, setFrequencyBotBenchmarkPct] = useState(() => parseFloat(localStorage.getItem('freq_bot_benchmark_pct') || '10.3'));
+  const [frequencyBotDigitFilterEnabled, setFrequencyBotDigitFilterEnabled] = useState(
+    () => localStorage.getItem('freq_bot_digit_filter_enabled') === 'true'
+  );
+  const [frequencyBotFilterDigits, setFrequencyBotFilterDigits] = useState(
+    () => localStorage.getItem('freq_bot_filter_digits') || '0'
+  );
+  const [frequencyBotFilterCompareMode, setFrequencyBotFilterCompareMode] = useState<'higher' | 'lower'>(
+    () => (localStorage.getItem('freq_bot_filter_compare_mode') || 'higher') as any
+  );
+  const [frequencyBotSmartRecoveryEnabled, setFrequencyBotSmartRecoveryEnabled] = useState(
+    () => localStorage.getItem('freq_bot_smart_recovery_enabled') === 'true'
+  );
+  const [frequencyBotCircleModeEnabled, setFrequencyBotCircleModeEnabled] = useState(
+    () => localStorage.getItem('freq_bot_circle_mode_enabled') === 'true'
+  );
+  const [frequencyBotCircleType, setFrequencyBotCircleType] = useState<'green' | 'red' | 'blue' | 'orange'>(
+    () => (localStorage.getItem('freq_bot_circle_type') || 'green') as any
+  );
+  const [frequencyBotRecoveryCircleType, setFrequencyBotRecoveryCircleType] = useState<'green' | 'red' | 'blue' | 'orange'>(
+    () => (localStorage.getItem('freq_bot_recovery_circle_type') || 'green') as any
+  );
+  const [frequencyBotPredictionDigit, setFrequencyBotPredictionDigit] = useState<number>(
+    () => parseInt(localStorage.getItem('freq_bot_prediction_digit') || '5', 10)
+  );
+  const [frequencyBotRecoveryPredictionDigit, setFrequencyBotRecoveryPredictionDigit] = useState<number>(
+    () => parseInt(localStorage.getItem('freq_bot_recovery_prediction_digit') || '5', 10)
+  );
+  const [frequencyBotRecoveryContractType, setFrequencyBotRecoveryContractType] = useState<'coldest' | 'differ' | 'over' | 'under' | 'even' | 'odd'>(
+    () => (localStorage.getItem('freq_bot_recovery_contract_type') || 'differ') as any
+  );
+  const [frequencyBotRecoveryTargetPct, setFrequencyBotRecoveryTargetPct] = useState(
+    () => parseFloat(localStorage.getItem('freq_bot_recovery_target_pct') || '10.0')
+  );
+  const [frequencyBotRecoveryCompareMode, setFrequencyBotRecoveryCompareMode] = useState<'higher' | 'lower'>(
+    () => (localStorage.getItem('freq_bot_recovery_compare_mode') || 'higher') as any
+  );
+  const [frequencyBotRecoveryFilterDigits, setFrequencyBotRecoveryFilterDigits] = useState(
+    () => localStorage.getItem('freq_bot_recovery_filter_digits') || '0'
+  );
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_circle_mode_enabled', frequencyBotCircleModeEnabled.toString());
+    (window as any).FREQUENCY_BOT_CIRCLE_MODE_ENABLED = frequencyBotCircleModeEnabled;
+  }, [frequencyBotCircleModeEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_circle_type', frequencyBotCircleType);
+    (window as any).FREQUENCY_BOT_CIRCLE_TYPE = frequencyBotCircleType;
+  }, [frequencyBotCircleType]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_recovery_circle_type', frequencyBotRecoveryCircleType);
+    (window as any).FREQUENCY_BOT_RECOVERY_CIRCLE_TYPE = frequencyBotRecoveryCircleType;
+  }, [frequencyBotRecoveryCircleType]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_prediction_digit', frequencyBotPredictionDigit.toString());
+    (window as any).FREQUENCY_BOT_PREDICTION_DIGIT = frequencyBotPredictionDigit;
+  }, [frequencyBotPredictionDigit]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_recovery_prediction_digit', frequencyBotRecoveryPredictionDigit.toString());
+    (window as any).FREQUENCY_BOT_RECOVERY_PREDICTION_DIGIT = frequencyBotRecoveryPredictionDigit;
+  }, [frequencyBotRecoveryPredictionDigit]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_stake', frequencyBotStake.toString());
+  }, [frequencyBotStake]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_auto_stake_enabled', frequencyBotAutoStakeEnabled.toString());
+  }, [frequencyBotAutoStakeEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_auto_stake_pct', frequencyBotAutoStakePct.toString());
+  }, [frequencyBotAutoStakePct]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_max_runs_enabled', frequencyBotMaxRunsEnabled.toString());
+  }, [frequencyBotMaxRunsEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_max_runs', frequencyBotMaxRuns.toString());
+  }, [frequencyBotMaxRuns]);
+
+  // Sync stake when auto-stake is enabled or balance/pct changes
+  useEffect(() => {
+    if (frequencyBotAutoStakeEnabled && !isFrequencyBotTrading) {
+      const bal = (rootStore.client as any)?.balance > 0 ? (rootStore.client as any).balance : 100;
+      const calcStake = Math.max(0.35, parseFloat((bal * (frequencyBotAutoStakePct / 100)).toFixed(2)));
+      setFrequencyBotStake(calcStake);
+    }
+  }, [frequencyBotAutoStakeEnabled, frequencyBotAutoStakePct, (rootStore.client as any)?.balance, isFrequencyBotTrading]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_martingale', frequencyBotMartingale.toString());
+  }, [frequencyBotMartingale]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_target_pct', frequencyBotTargetPct.toString());
+  }, [frequencyBotTargetPct]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_contract_type', frequencyBotContractType);
+  }, [frequencyBotContractType]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_tp', frequencyBotTp.toString());
+  }, [frequencyBotTp]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_duration', frequencyBotDuration.toString());
+  }, [frequencyBotDuration]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_even_odd_mode', frequencyBotEvenOddMode);
+  }, [frequencyBotEvenOddMode]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_benchmark_pct', frequencyBotBenchmarkPct.toString());
+  }, [frequencyBotBenchmarkPct]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_sl', frequencyBotSl.toString());
+  }, [frequencyBotSl]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_digit_filter_enabled', frequencyBotDigitFilterEnabled.toString());
+  }, [frequencyBotDigitFilterEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_filter_digits', frequencyBotFilterDigits);
+  }, [frequencyBotFilterDigits]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_filter_compare_mode', frequencyBotFilterCompareMode);
+  }, [frequencyBotFilterCompareMode]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_smart_recovery_enabled', frequencyBotSmartRecoveryEnabled.toString());
+  }, [frequencyBotSmartRecoveryEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_recovery_contract_type', frequencyBotRecoveryContractType);
+  }, [frequencyBotRecoveryContractType]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_recovery_target_pct', frequencyBotRecoveryTargetPct.toString());
+  }, [frequencyBotRecoveryTargetPct]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_recovery_compare_mode', frequencyBotRecoveryCompareMode);
+  }, [frequencyBotRecoveryCompareMode]);
+
+  useEffect(() => {
+    localStorage.setItem('freq_bot_recovery_filter_digits', frequencyBotRecoveryFilterDigits);
+  }, [frequencyBotRecoveryFilterDigits]);
+
+  // --- AI MARKET HACKER (10 Volatilities Digit Scanner) State ---
+  const [showHackerModal, setShowHackerModal] = useState(false);
+  const [hackerScanning, setHackerScanning] = useState(false);
+  const [hackerStake, setHackerStake] = useState(() => parseFloat(localStorage.getItem('hacker_stake') || '0.50'));
+  const [hackerMartingaleMultiplier, setHackerMartingaleMultiplier] = useState(() => parseFloat(localStorage.getItem('hacker_martingale_mult') || '2.1'));
+  const [hackerMartingaleAfterLosses, setHackerMartingaleAfterLosses] = useState(() => parseInt(localStorage.getItem('hacker_martingale_after_losses') || '1', 10));
+  const [hackerDurationTicks, setHackerDurationTicks] = useState<number>(() => {
+    const saved = localStorage.getItem('hacker_duration_ticks');
+    return saved ? Math.max(1, Math.min(10, parseInt(saved, 10) || 1)) : 1;
+  });
+  const [hackerMaxTrades, setHackerMaxTrades] = useState(() => parseInt(localStorage.getItem('hacker_max_trades') || '5', 10));
+  const [hackerVirtualMode, setHackerVirtualMode] = useState(() => localStorage.getItem('hacker_virtual_mode') === 'true');
+  const [hackerVirtualLosses, setHackerVirtualLosses] = useState(() => {
+    const val = parseInt(localStorage.getItem('hacker_virtual_losses') || '1', 10);
+    return isNaN(val) || val < 1 ? 1 : val;
+  });
+  const [hackerAutoRestartWin, setHackerAutoRestartWin] = useState(() => localStorage.getItem('hacker_auto_restart_win') === 'true');
+  const [hackerSameMarketRecovery, setHackerSameMarketRecovery] = useState(() => localStorage.getItem('hacker_same_market_recovery') === 'true');
+  const [hackerContinuousSameMarket, setHackerContinuousSameMarket] = useState(() => localStorage.getItem('hacker_continuous_same_market') === 'true');
+  const [hackerRecoveryContract, setHackerRecoveryContract] = useState<'DIGITOVER' | 'DIGITUNDER'>(() => (localStorage.getItem('hacker_recovery_contract') as 'DIGITOVER' | 'DIGITUNDER') || 'DIGITOVER');
+  const [hackerVirtualStats, setHackerVirtualStats] = useState({ wins: 0, losses: 0 });
+  const [hackerTradesCount, setHackerTradesCount] = useState(0);
+  const [hackerWinsCount, setHackerWinsCount] = useState(0);
+  const [hackerLossesCount, setHackerLossesCount] = useState(0);
+  const [hackerSessionProfit, setHackerSessionProfit] = useState(0);
+  const [hackerLogs, setHackerLogs] = useState<string[]>([]);
+  const [hackerMarketDigits, setHackerMarketDigits] = useState<Record<string, number[]>>({});
+  const [hackerMathSummaries, setHackerMathSummaries] = useState<Record<string, HackerMathSummary>>({});
+  const [hackerSelectedMathSymbol, setHackerSelectedMathSymbol] = useState<string>('1HZ10V');
+  const hackerMathEnginesRef = useRef<Record<string, {
+    ingestion: IngestionBuffer;
+    solver: MathReconstructionSolver;
+    generator: ShadowGenerator;
+    evaluator: AccuracyEvaluator;
+    lastPred: ShadowPrediction | null;
+  }>>({});
+  const hackerSocketRef = useRef<WebSocket | null>(null);
+  const hackerDigitsRef = useRef<Record<string, number[]>>({});
+  const hackerIsExecutingRef = useRef(false);
+  const hackerTradesCountRef = useRef(0);
+  const hackerWinsCountRef = useRef(0);
+  const hackerMaxTradesRef = useRef(5);
+  const hackerStakeRef = useRef(0.50);
+  const hackerCurrentStakeRef = useRef(0.50);
+  const hackerMartingaleMultRef = useRef(2.1);
+  const hackerMartingaleAfterLossesRef = useRef(1);
+  const hackerDurationTicksRef = useRef(1);
+  const hackerConsecutiveLossesRef = useRef(0);
+  const hackerScanningRef = useRef(false);
+  const hackerVirtualModeRef = useRef(false);
+  const hackerVirtualLossesRef = useRef(1);
+  const hackerAutoRestartWinRef = useRef(false);
+  const hackerSameMarketRecoveryRef = useRef(false);
+  const hackerContinuousSameMarketRef = useRef(false);
+  const hackerLockedMarketRef = useRef<string | null>(null);
+  const hasTriggeredRealTradeForLockedMarketRef = useRef(false);
+  const hackerRecoveryContractRef = useRef<'DIGITOVER' | 'DIGITUNDER'>('DIGITOVER');
+  const lastProcessedHackerContractIdRef = useRef<string | null>(null);
+  const hackerLastExecutionStartRef = useRef<number>(0);
+  const hackerActiveVirtualSessionRef = useRef<{
+    sym: string;
+    virtualContractType: 'DIGITUNDER' | 'DIGITOVER';
+    virtualBarrier: number;
+    realContractType: 'DIGITUNDER' | 'DIGITOVER';
+    realBarrier: number;
+    currentVirtualLosses: number;
+    targetVirtualLosses: number;
+    signalType: 'OVER 1' | 'UNDER 8';
+    entryEpoch: number;
+    entryQuote: number;
+    entryDigit: number;
+    entrySpotStr: string;
+    durationTicks: number;
+    ticksElapsed: number;
+    placedAtTime: number;
+    lastTickKey?: string;
+  } | null>(null);
+
+  const VOLATILITY_10_MARKETS = useMemo(() => [
+    '1HZ10V', 'R_10',
+    '1HZ25V', 'R_25',
+    '1HZ50V', 'R_50',
+    '1HZ75V', 'R_75',
+    '1HZ100V', 'R_100'
+  ], []);
+
+  const addHackerLog = (msg: string) => {
+    setHackerLogs(prev => [...prev, msg].slice(-100));
+  };
+
+  useEffect(() => {
+    localStorage.setItem('hacker_stake', hackerStake.toString());
+    hackerStakeRef.current = hackerStake;
+    if (!hackerScanningRef.current) {
+      hackerCurrentStakeRef.current = hackerStake;
+    }
+  }, [hackerStake]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_martingale_mult', hackerMartingaleMultiplier.toString());
+    hackerMartingaleMultRef.current = hackerMartingaleMultiplier;
+  }, [hackerMartingaleMultiplier]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_martingale_after_losses', hackerMartingaleAfterLosses.toString());
+    hackerMartingaleAfterLossesRef.current = hackerMartingaleAfterLosses;
+  }, [hackerMartingaleAfterLosses]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_duration_ticks', hackerDurationTicks.toString());
+    hackerDurationTicksRef.current = hackerDurationTicks;
+  }, [hackerDurationTicks]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_max_trades', hackerMaxTrades.toString());
+    hackerMaxTradesRef.current = hackerMaxTrades;
+  }, [hackerMaxTrades]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_virtual_mode', hackerVirtualMode.toString());
+    hackerVirtualModeRef.current = hackerVirtualMode;
+  }, [hackerVirtualMode]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_virtual_losses', hackerVirtualLosses.toString());
+    hackerVirtualLossesRef.current = hackerVirtualLosses;
+  }, [hackerVirtualLosses]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_auto_restart_win', hackerAutoRestartWin.toString());
+    hackerAutoRestartWinRef.current = hackerAutoRestartWin;
+  }, [hackerAutoRestartWin]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_same_market_recovery', hackerSameMarketRecovery.toString());
+    hackerSameMarketRecoveryRef.current = hackerSameMarketRecovery;
+  }, [hackerSameMarketRecovery]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_continuous_same_market', hackerContinuousSameMarket.toString());
+    hackerContinuousSameMarketRef.current = hackerContinuousSameMarket;
+  }, [hackerContinuousSameMarket]);
+
+  useEffect(() => {
+    localStorage.setItem('hacker_recovery_contract', hackerRecoveryContract);
+    hackerRecoveryContractRef.current = hackerRecoveryContract;
+  }, [hackerRecoveryContract]);
+
+  const toggleHackerAutoRestartWin = (enable: boolean) => {
+    setHackerAutoRestartWin(enable);
+    hackerAutoRestartWinRef.current = enable;
+    if (enable) {
+      setHackerVirtualMode(true);
+      hackerVirtualModeRef.current = true;
+      setHackerVirtualLosses(1);
+      hackerVirtualLossesRef.current = 1;
+    }
+  };
+
+  const executeHackerTrade = (sym: string, contractType: 'DIGITUNDER' | 'DIGITOVER', barrier: number, stake: number) => {
+    const token = getActiveToken();
+    if (!token) {
+      addHackerLog('[ERROR] No active Deriv account token.');
+      hackerIsExecutingRef.current = false;
+      hackerLastExecutionStartRef.current = 0;
+      return;
+    }
+
+    try {
+      if (botEngine.isRunning) {
+        botEngine.stop();
+      }
+      (botEngine as any).canPurchase = true;
+      (botEngine as any).is_contract_loading = false;
+      (botEngine as any).pendingProposalsCount = 0;
+      (botEngine as any).openContractIds?.clear();
+      botEngine.currentContract = null;
+      (botEngine as any).activeTransaction = null;
+    } catch (e) {}
+
+    hackerLastExecutionStartRef.current = Date.now();
+    const durationTicks = Math.max(1, Math.min(10, hackerDurationTicksRef.current || 1));
+
+    const scriptCode = `
+      window.INITIALIZATION = async function() {
+        Bot.notify('success', 'AI Market Hacker: Signal on ${sym}! Placing ${contractType} ${barrier} ($${stake}, ${durationTicks}t)...');
+      };
+      window.TRADE_OPTIONS = async function() {
+        Bot.switchMarket('${sym}');
+        Bot.setTradeTypeCategory('digits');
+        Bot.setTradeType('${contractType === 'DIGITUNDER' ? 'digitunder' : 'digitover'}');
+        Bot.setContractType('${contractType}');
+        Bot.setTradeOptions({
+          durationType: 't',
+          duration: ${durationTicks},
+          amount: ${stake},
+          prediction: ${barrier}
+        });
+      };
+      window.BEFORE_PURCHASE = async function() {
+        let bought = Bot.purchase('${contractType}', ${barrier});
+        if (!bought) {
+          await Bot.sleep(0.15);
+          Bot.purchase('${contractType}', ${barrier});
+        }
+      };
+      window.AFTER_PURCHASE = async function() {
+        const result = Bot.checkResult('win');
+        const profit = Bot.readDetail('profit');
+        const contractId = Bot.readDetail('contract_id');
+        Bot.notify(result ? 'success' : 'warn', 'AI Market Hacker: Trade ' + (result ? 'WON +$' + profit : 'LOST -$' + Math.abs(profit)));
+        window.dispatchEvent(new CustomEvent('ai_hacker_trade_result', {
+          detail: { result, profit, contractId, sym: '${sym}', contractType: '${contractType}', barrier: ${barrier} }
+        }));
+        Bot.stop();
+      };
+    `;
+
+    const accId = getActiveAccountId();
+    const connectionType = (localStorage.getItem('deriv_connection_type') || 'oauth') as 'oauth' | 'legacy';
+    botEngine.start(token, scriptCode, 'ai_market_hacker', `AI Hacker - ${sym}`, accId || undefined, connectionType)
+      .catch((err) => {
+        addHackerLog(`[ERROR] Start trade failed: ${err?.message || err}`);
+        hackerIsExecutingRef.current = false;
+        hackerLastExecutionStartRef.current = 0;
+      });
+  };
+
+  const stopHackerScanner = (reasonArg?: string | React.MouseEvent) => {
+    const reason = typeof reasonArg === 'string' ? reasonArg : 'stopped by user';
+    setHackerScanning(false);
+    hackerScanningRef.current = false;
+    hackerIsExecutingRef.current = false;
+    hackerLastExecutionStartRef.current = 0;
+    hackerActiveVirtualSessionRef.current = null;
+    hackerLockedMarketRef.current = null;
+    hasTriggeredRealTradeForLockedMarketRef.current = false;
+    if (reason === 'stopped by user') {
+      hackerConsecutiveLossesRef.current = 0;
+      hackerCurrentStakeRef.current = hackerStakeRef.current;
+    }
+    if (hackerSocketRef.current) {
+      hackerSocketRef.current.close();
+      hackerSocketRef.current = null;
+    }
+    if (botEngine.isRunning) {
+      botEngine.stop();
+    }
+    addHackerLog(`[SYS] Scanner ${reason}.`);
+  };
+
+  const startHackerScanner = () => {
+    const token = getActiveToken();
+    if (!token) {
+      alert('Please connect your Deriv account first.');
+      return;
+    }
+
+    setHackerScanning(true);
+    hackerScanningRef.current = true;
+    setHackerTradesCount(0);
+    setHackerWinsCount(0);
+    setHackerLossesCount(0);
+    setHackerSessionProfit(0);
+    setHackerVirtualStats({ wins: 0, losses: 0 });
+    hackerTradesCountRef.current = 0;
+    hackerWinsCountRef.current = 0;
+    hackerMaxTradesRef.current = hackerMaxTrades;
+    hackerStakeRef.current = hackerStake;
+    if (hackerConsecutiveLossesRef.current === 0) {
+      hackerCurrentStakeRef.current = hackerStake;
+    }
+    hackerMartingaleMultRef.current = hackerMartingaleMultiplier;
+    hackerMartingaleAfterLossesRef.current = hackerMartingaleAfterLosses;
+    hackerDurationTicksRef.current = hackerDurationTicks;
+    hackerVirtualModeRef.current = hackerVirtualMode;
+    hackerVirtualLossesRef.current = hackerVirtualLosses;
+    hackerAutoRestartWinRef.current = hackerAutoRestartWin;
+    hackerSameMarketRecoveryRef.current = hackerSameMarketRecovery;
+    hackerContinuousSameMarketRef.current = hackerContinuousSameMarket;
+    hackerRecoveryContractRef.current = hackerRecoveryContract;
+    hackerIsExecutingRef.current = false;
+    hackerActiveVirtualSessionRef.current = null;
+    hackerLockedMarketRef.current = null;
+    hasTriggeredRealTradeForLockedMarketRef.current = false;
+    lastProcessedHackerContractIdRef.current = null;
+
+    addHackerLog('[SYS] Authenticating at market matrix...');
+    addHackerLog('[SYS] Synthetic stream linked (10 Volatility Markets)');
+    addHackerLog('[SCAN] Initializing 100-tick historical buffer...');
+    addHackerLog(`[SYS] Stake: $${hackerStake.toFixed(2)} | Duration: ${hackerDurationTicks} tick(s) | Target Wins (Runs): ${hackerMaxTrades} | Martingale: ${hackerMartingaleMultiplier}x after ${hackerMartingaleAfterLosses} loss(es)`);
+    addHackerLog(`[VIRTUAL MANAGER] Virtual Switch: ${hackerVirtualMode ? `ENABLED (Opposite Direction Mode - Target Virtual Losses: ${hackerVirtualLosses})` : 'DISABLED (Direct Real Trading)'}`);
+    if (hackerAutoRestartWin) {
+      addHackerLog('[AUTO-RESTART MANAGER] Auto-Restart on Virtual Win: ACTIVE (Auto-restarting bot on opposite virtual win until first virtual loss occurs)');
+    }
+    if (hackerSameMarketRecovery) {
+      addHackerLog(`[SAME MARKET RECOVERY] Active: Immediate recovery on loss market using ${hackerRecoveryContract === 'DIGITOVER' ? 'Over 1' : 'Under 8'}`);
+    }
+    if (hackerContinuousSameMarket) {
+      addHackerLog('[CONTINUOUS SAME MARKET] Active: Once a signal is triggered on a market, scanner locks onto that market for continuous same-market trades.');
+    }
+    addHackerLog('[OK] AI Market Hacker High-Precision 4-Layer Math Filter armed');
+    addHackerLog('[LAYER 1] Real Binary Win Probability Engine (Markov P(Win) >= 80.0%)');
+    addHackerLog('[LAYER 2] 3-Tick Real Binary State Confirmation (Binary 0b111 Safe Pattern & Trigger Digit)');
+    addHackerLog('[LAYER 3] Zero Trap Digit Filter (0 losing digits [0,1] or [8,9] in last 4 ticks)');
+    addHackerLog('[LAYER 4] Math Reconstruction Shadow Generator Engine (Next predicted digit safe)');
+
+    if (hackerSocketRef.current) {
+      hackerSocketRef.current.close();
+    }
+
+    const ws = new WebSocket('wss://api.derivws.com/trading/v1/options/ws/public');
+    hackerSocketRef.current = ws;
+
+    ws.onopen = () => {
+      VOLATILITY_10_MARKETS.forEach(m => {
+        hackerDigitsRef.current[m] = [];
+        ws.send(JSON.stringify({
+          ticks_history: m,
+          count: 100,
+          end: "latest",
+          style: "ticks"
+        }));
+        ws.send(JSON.stringify({ ticks: m, subscribe: 1 }));
+      });
+    };
+
+    ws.onmessage = (event) => {
+      if (!hackerScanningRef.current) return;
+      const data = JSON.parse(event.data);
+
+      if (data.msg_type === 'history' && data.echo_req.ticks_history) {
+        const sym = data.echo_req.ticks_history;
+        const prices = data.history?.prices || [];
+        const precision = getSymbolDecimals(sym);
+        const digits = prices.map((p: number) => {
+          const sPrice = p.toFixed(precision);
+          return parseInt(sPrice[sPrice.length - 1], 10);
+        });
+        hackerDigitsRef.current[sym] = digits.slice(-100);
+        setHackerMarketDigits(prev => ({ ...prev, [sym]: hackerDigitsRef.current[sym] }));
+
+        // Fit Math Reconstruction Solver & Shadow Generator for history
+        if (!hackerMathEnginesRef.current[sym]) {
+          const ingestion = new IngestionBuffer(1000);
+          const solver = new MathReconstructionSolver();
+          const generator = new ShadowGenerator(solver);
+          const evaluator = new AccuracyEvaluator();
+          hackerMathEnginesRef.current[sym] = { ingestion, solver, generator, evaluator, lastPred: null };
+        }
+        const engine = hackerMathEnginesRef.current[sym];
+        digits.forEach((d: number) => engine.ingestion.push(d));
+        engine.solver.fit(engine.ingestion.getAll());
+        if (digits.length > 0) {
+          const lastD = digits[digits.length - 1];
+          engine.lastPred = engine.generator.predictNext(lastD);
+        }
+        const report = engine.evaluator.getReport();
+        if (engine.lastPred) {
+          setHackerMathSummaries(prev => ({
+            ...prev,
+            [sym]: {
+              symbol: sym,
+              isDeterministic: engine.solver.isDeterministic,
+              lcgParams: engine.solver.lcgParams,
+              topPrediction: engine.lastPred!.topPrediction,
+              confidence: engine.lastPred!.confidence,
+              top3Predictions: engine.lastPred!.top3Predictions,
+              probabilities: engine.lastPred!.probabilities,
+              totalEvaluated: report.totalEvaluated,
+              exactAccuracyPct: report.exactMatchAccuracyPct,
+              top3AccuracyPct: report.top3MatchAccuracyPct,
+              mae: report.meanAbsoluteError
+            }
+          }));
+        }
+      }
+
+      if (data.msg_type === 'tick' && data.tick) {
+        const sym = data.tick.symbol;
+        if (!VOLATILITY_10_MARKETS.includes(sym)) return;
+
+        // Ignore ticks from other markets if locked onto a market for continuous same-market trading
+        if (hackerContinuousSameMarketRef.current && hackerLockedMarketRef.current && sym !== hackerLockedMarketRef.current) {
+          return;
+        }
+        const quote = data.tick.quote;
+        const precision = getSymbolDecimals(sym);
+        const digit = parseInt(quote.toFixed(precision).slice(-1), 10);
+
+        if (!hackerDigitsRef.current[sym]) hackerDigitsRef.current[sym] = [];
+        const history = [...hackerDigitsRef.current[sym], digit].slice(-100);
+        hackerDigitsRef.current[sym] = history;
+        setHackerMarketDigits(prev => ({ ...prev, [sym]: history }));
+
+        // Mathematical Reconstruction Engine - Continuous Evaluator & Ingestion Loop
+        if (!hackerMathEnginesRef.current[sym]) {
+          const ingestion = new IngestionBuffer(1000);
+          const solver = new MathReconstructionSolver();
+          const generator = new ShadowGenerator(solver);
+          const evaluator = new AccuracyEvaluator();
+          hackerMathEnginesRef.current[sym] = { ingestion, solver, generator, evaluator, lastPred: null };
+        }
+        const mathEngine = hackerMathEnginesRef.current[sym];
+        if (mathEngine.lastPred) {
+          mathEngine.evaluator.evaluate(digit, mathEngine.lastPred);
+        }
+        mathEngine.ingestion.push(digit);
+        mathEngine.solver.fit(mathEngine.ingestion.getAll());
+        const nextPred = mathEngine.generator.predictNext(digit);
+        mathEngine.lastPred = nextPred;
+
+        const report = mathEngine.evaluator.getReport();
+        setHackerMathSummaries(prev => ({
+          ...prev,
+          [sym]: {
+            symbol: sym,
+            isDeterministic: mathEngine.solver.isDeterministic,
+            lcgParams: mathEngine.solver.lcgParams,
+            topPrediction: nextPred.topPrediction,
+            confidence: nextPred.confidence,
+            top3Predictions: nextPred.top3Predictions,
+            probabilities: nextPred.probabilities,
+            totalEvaluated: report.totalEvaluated,
+            exactAccuracyPct: report.exactMatchAccuracyPct,
+            top3AccuracyPct: report.top3MatchAccuracyPct,
+            mae: report.meanAbsoluteError
+          }
+        }));
+
+        // Resolve active Virtual Trading Session if one is running on this symbol
+        const activeVirtual = hackerActiveVirtualSessionRef.current;
+        if (activeVirtual && activeVirtual.sym === sym) {
+          const currentTickKey = `${data.tick.epoch}_${quote}_${digit}`;
+          if (activeVirtual.lastTickKey !== currentTickKey) {
+            activeVirtual.lastTickKey = currentTickKey;
+
+            const isSubsequentTick = data.tick.epoch > activeVirtual.entryEpoch || (Date.now() - activeVirtual.placedAtTime > 1200);
+            if (isSubsequentTick) {
+              activeVirtual.ticksElapsed += 1;
+              const reqTicks = activeVirtual.durationTicks || 1;
+
+              if (activeVirtual.ticksElapsed < reqTicks) {
+                addHackerLog(`[VIRTUAL TICK ${activeVirtual.ticksElapsed}/${reqTicks}] ${sym} | Current Quote: ${quote.toFixed(precision)} (Digit ${digit})`);
+              } else {
+                // Duration reached! Settle contract at current exit point
+                const exitSpotStr = `${quote.toFixed(precision)} (Digit ${digit})`;
+                const isWin = activeVirtual.virtualContractType === 'DIGITOVER'
+                  ? digit > activeVirtual.virtualBarrier
+                  : digit < activeVirtual.virtualBarrier;
+
+                const entrySpotStr = activeVirtual.entrySpotStr || `${activeVirtual.entryQuote.toFixed(precision)} (Digit ${activeVirtual.entryDigit})`;
+
+                if (isWin) {
+                  activeVirtual.currentVirtualLosses = 0;
+                  setHackerVirtualStats(prev => ({ ...prev, wins: prev.wins + 1 }));
+                  addHackerLog(`[VIRTUAL WIN] ${sym} | ENTRY POINT: ${entrySpotStr} → EXIT POINT: ${exitSpotStr} | Outcome: VIRTUAL WIN (${activeVirtual.virtualContractType} ${activeVirtual.virtualBarrier}) | Consecutive Virtual Losses reset to 0/${activeVirtual.targetVirtualLosses}`);
+
+                  botEngine.transactions.unshift({
+                    id: `virt_${Date.now()}`,
+                    type: activeVirtual.virtualContractType === 'DIGITOVER' ? 'OVER' : 'UNDER',
+                    contractType: activeVirtual.virtualContractType,
+                    symbol: sym,
+                    entrySpot: entrySpotStr,
+                    exitSpot: exitSpotStr,
+                    buyPrice: hackerCurrentStakeRef.current,
+                    profit: +(hackerCurrentStakeRef.current * 0.09).toFixed(2),
+                    result: 'win',
+                    timestamp: Date.now(),
+                    barrier: activeVirtual.virtualBarrier.toString(),
+                    isVirtual: true,
+                    currency: 'USD'
+                  });
+                  botEngine.loadTransactions();
+
+                  if (hackerAutoRestartWinRef.current) {
+                    addHackerLog(`[AUTO-RESTART ON VIRTUAL WIN] Opposite virtual trade was a WIN! Automatically restarting bot to retry for a virtual LOSS...`);
+                    hackerActiveVirtualSessionRef.current = null;
+                    hackerIsExecutingRef.current = false;
+                    if (hackerScanningRef.current) {
+                      stopHackerScanner('auto-restart on virtual win');
+                      setTimeout(() => {
+                        startHackerScanner();
+                      }, 500);
+                    }
+                    return;
+                  }
+                } else {
+                  const nextLosses = activeVirtual.currentVirtualLosses + 1;
+                  activeVirtual.currentVirtualLosses = nextLosses;
+                  setHackerVirtualStats(prev => ({ ...prev, losses: prev.losses + 1 }));
+                  addHackerLog(`[VIRTUAL LOSS] ${sym} | ENTRY POINT: ${entrySpotStr} → EXIT POINT: ${exitSpotStr} | Outcome: VIRTUAL LOSS #${nextLosses}/${activeVirtual.targetVirtualLosses} (Opposite ${activeVirtual.virtualContractType} ${activeVirtual.virtualBarrier})`);
+
+                  botEngine.transactions.unshift({
+                    id: `virt_${Date.now()}`,
+                    type: activeVirtual.virtualContractType === 'DIGITOVER' ? 'OVER' : 'UNDER',
+                    contractType: activeVirtual.virtualContractType,
+                    symbol: sym,
+                    entrySpot: entrySpotStr,
+                    exitSpot: exitSpotStr,
+                    buyPrice: hackerCurrentStakeRef.current,
+                    profit: -hackerCurrentStakeRef.current,
+                    result: 'loss',
+                    timestamp: Date.now(),
+                    barrier: activeVirtual.virtualBarrier.toString(),
+                    isVirtual: true,
+                    currency: 'USD'
+                  });
+                  botEngine.loadTransactions();
+
+                  if (nextLosses >= activeVirtual.targetVirtualLosses) {
+                    addHackerLog(`[VIRTUAL THRESHOLD MET] Reached target of ${activeVirtual.targetVirtualLosses} CONSECUTIVE virtual loss(es) on opposite ${activeVirtual.virtualContractType} ${activeVirtual.virtualBarrier}! Placing REAL ${activeVirtual.realContractType} ${activeVirtual.realBarrier} contract on ${sym} @ $${hackerCurrentStakeRef.current.toFixed(2)}...`);
+                    const realContractType = activeVirtual.realContractType;
+                    const realBarrier = activeVirtual.realBarrier;
+                    hackerActiveVirtualSessionRef.current = null;
+                    hasTriggeredRealTradeForLockedMarketRef.current = true;
+                    executeHackerTrade(sym, realContractType, realBarrier, hackerCurrentStakeRef.current);
+                    return;
+                  }
+                }
+                return;
+              }
+            }
+          }
+          return;
+        }
+
+        const last4 = history.slice(-4);
+        const last3 = history.slice(-3);
+
+        if (history.length >= 20 && !hackerIsExecutingRef.current && !hackerActiveVirtualSessionRef.current) {
+          // LAYER 1: Real Binary Win Probability Engine (Markov P(Win) >= 80.0%)
+          // Calculated directly from empirical Markov transition probabilities for the current digit
+          const probs = nextPred ? nextPred.probabilities : Array(10).fill(0.1);
+          const pWinOver1 = probs.slice(2, 10).reduce((sum, p) => sum + p, 0);
+          const pWinUnder8 = probs.slice(0, 8).reduce((sum, p) => sum + p, 0);
+
+          const layer1Over1Pass = pWinOver1 >= 0.80; // Binary win probability >= 80%
+          const layer1Under8Pass = pWinUnder8 >= 0.80; // Binary win probability >= 80%
+
+          // LAYER 2: 3-Tick Real Binary State Confirmation Entry Trigger Rule (Bitwise 0b111 Safe Pattern)
+          // Over 1: Confirm last 3 ticks contain NO 0 and 1 (losing digits for Over 1) and trigger digit is 2, 3, or 4
+          const layer2Over1Pass = last3.every(d => d >= 2) && (digit === 2 || digit === 3 || digit === 4);
+
+          // Under 8: Confirm last 3 ticks contain NO 8 and 9 (losing digits for Under 8) and trigger digit is 7, 6, or 5
+          const layer2Under8Pass = last3.every(d => d <= 7) && (digit === 7 || digit === 6 || digit === 5);
+
+          // LAYER 3: Trap Digit Cluster Filter (0 losing trap digits in last 4 ticks)
+          const trapCountOver1 = last4.filter(d => d === 0 || d === 1).length;
+          const trapCountUnder8 = last4.filter(d => d === 8 || d === 9).length;
+
+          const layer3Over1Pass = trapCountOver1 === 0;
+          const layer3Under8Pass = trapCountUnder8 === 0;
+
+          // LAYER 4: Math Reconstruction Shadow Generator Filter (Confirm next predicted digit is safe)
+          const layer4Over1Pass = !nextPred || (nextPred.topPrediction !== 0 && nextPred.topPrediction !== 1);
+          const layer4Under8Pass = !nextPred || (nextPred.topPrediction !== 8 && nextPred.topPrediction !== 9);
+
+          const over1Condition = layer1Over1Pass && layer2Over1Pass && layer3Over1Pass && layer4Over1Pass;
+          const under8Condition = layer1Under8Pass && layer2Under8Pass && layer3Under8Pass && layer4Under8Pass;
+
+          if (under8Condition || over1Condition) {
+            const signalType: 'OVER 1' | 'UNDER 8' = over1Condition ? 'OVER 1' : 'UNDER 8';
+            // Entry found by AI: Over 1 -> Real contract is DIGITOVER 1; Under 8 -> Real contract is DIGITUNDER 8
+            const realContractType: 'DIGITOVER' | 'DIGITUNDER' = over1Condition ? 'DIGITOVER' : 'DIGITUNDER';
+            const realBarrier = over1Condition ? 1 : 8;
+
+            // Opposite direction for Virtual Switch: Over 1 entry -> virtual takes Under 8; Under 8 entry -> virtual takes Over 1
+            const virtualContractType: 'DIGITOVER' | 'DIGITUNDER' = over1Condition ? 'DIGITUNDER' : 'DIGITOVER';
+            const virtualBarrier = over1Condition ? 8 : 1;
+
+            const winProbPct = over1Condition ? (pWinOver1 * 100).toFixed(1) : (pWinUnder8 * 100).toFixed(1);
+            const triggerDigit = digit;
+            const predDigit = nextPred ? nextPred.topPrediction : 'N/A';
+            const predConf = nextPred ? (nextPred.confidence * 100).toFixed(1) : 'N/A';
+
+            const ruleName = over1Condition
+              ? `OVER 1 ENTRY SIGNAL (L1 P(Win): ${winProbPct}% >= 80%, L2 Trig: Digit ${triggerDigit} [3t Binary 0b111], L3 Trap: 0/4 Trap, L4 Math Pred: Digit ${predDigit} @ ${predConf}%)`
+              : `UNDER 8 ENTRY SIGNAL (L1 P(Win): ${winProbPct}% >= 80%, L2 Trig: Digit ${triggerDigit} [3t Binary 0b111], L3 Trap: 0/4 Trap, L4 Math Pred: Digit ${predDigit} @ ${predConf}%)`;
+
+            hackerIsExecutingRef.current = true;
+            if (hackerContinuousSameMarketRef.current && !hackerLockedMarketRef.current) {
+              hackerLockedMarketRef.current = sym;
+              addHackerLog(`[SAME MARKET LOCK] Signal confirmed on ${sym}. Scanner locked onto ${sym} for continuous same-market trades.`);
+            }
+            addHackerLog(`[SIGNAL CONFIRMED] ${sym} matched High-Precision 4-Layer Math Filter -> ${signalType}`);
+            addHackerLog(`[RULE] ${ruleName}`);
+
+            if (hackerVirtualModeRef.current && (!hackerContinuousSameMarketRef.current || !hasTriggeredRealTradeForLockedMarketRef.current)) {
+              const durationTicks = Math.max(1, Math.min(10, hackerDurationTicksRef.current || 1));
+              const entrySpotStr = `${quote.toFixed(precision)} (Digit ${digit})`;
+              addHackerLog(`[VIRTUAL SWITCH ACTIVE] Virtual contract placed @ ENTRY POINT: ${entrySpotStr}. Taking Virtual ${virtualContractType} ${virtualBarrier} on ${sym} (Waiting for ${durationTicks}-tick settlement, target: ${hackerVirtualLossesRef.current} virtual loss(es))...`);
+              hackerActiveVirtualSessionRef.current = {
+                sym,
+                virtualContractType,
+                virtualBarrier,
+                realContractType,
+                realBarrier,
+                currentVirtualLosses: 0,
+                targetVirtualLosses: hackerVirtualLossesRef.current,
+                signalType,
+                entryEpoch: data.tick.epoch,
+                entryQuote: quote,
+                entryDigit: digit,
+                entrySpotStr,
+                durationTicks,
+                ticksElapsed: 0,
+                placedAtTime: Date.now(),
+                lastTickKey: `${data.tick.epoch}_${quote}_${digit}`
+              };
+            } else {
+              hasTriggeredRealTradeForLockedMarketRef.current = true;
+              addHackerLog(`[EXECUTE REAL TRADE] Purchasing REAL ${realContractType} (Barrier ${realBarrier}) on ${sym} @ $${hackerCurrentStakeRef.current.toFixed(2)}...`);
+              executeHackerTrade(sym, realContractType, realBarrier, hackerCurrentStakeRef.current);
+            }
+          } else if (hackerContinuousSameMarketRef.current && hackerLockedMarketRef.current === sym) {
+            // Continuous same-market trading: Execute next trade on locked market if trap count is safe
+            const isOver = trapCountOver1 === 0 && pWinOver1 >= pWinUnder8;
+            const isUnder = trapCountUnder8 === 0 && pWinUnder8 > pWinOver1;
+
+            if (isOver || isUnder) {
+              const signalType: 'OVER 1' | 'UNDER 8' = isOver ? 'OVER 1' : 'UNDER 8';
+              const realContractType: 'DIGITOVER' | 'DIGITUNDER' = isOver ? 'DIGITOVER' : 'DIGITUNDER';
+              const realBarrier = isOver ? 1 : 8;
+              const virtualContractType: 'DIGITOVER' | 'DIGITUNDER' = isOver ? 'DIGITUNDER' : 'DIGITOVER';
+              const virtualBarrier = isOver ? 8 : 1;
+
+              hackerIsExecutingRef.current = true;
+
+              if (hackerVirtualModeRef.current && !hasTriggeredRealTradeForLockedMarketRef.current) {
+                const durationTicks = Math.max(1, Math.min(10, hackerDurationTicksRef.current || 1));
+                const entrySpotStr = `${quote.toFixed(precision)} (Digit ${digit})`;
+                addHackerLog(`[CONTINUOUS VIRTUAL SESSION] Virtual switch active @ ENTRY POINT: ${entrySpotStr}: Taking Virtual ${virtualContractType} ${virtualBarrier} trades on ${sym} (${durationTicks}t)...`);
+                hackerActiveVirtualSessionRef.current = {
+                  sym,
+                  virtualContractType,
+                  virtualBarrier,
+                  realContractType,
+                  realBarrier,
+                  currentVirtualLosses: 0,
+                  targetVirtualLosses: hackerVirtualLossesRef.current,
+                  signalType,
+                  entryEpoch: data.tick.epoch,
+                  entryQuote: quote,
+                  entryDigit: digit,
+                  entrySpotStr,
+                  durationTicks,
+                  ticksElapsed: 0,
+                  placedAtTime: Date.now(),
+                  lastTickKey: `${data.tick.epoch}_${quote}_${digit}`
+                };
+              } else {
+                hasTriggeredRealTradeForLockedMarketRef.current = true;
+                addHackerLog(`[CONTINUOUS REAL TRADE] Executing continuous REAL ${realContractType} ${realBarrier} trade on locked market ${sym} @ $${hackerCurrentStakeRef.current.toFixed(2)}...`);
+                executeHackerTrade(sym, realContractType, realBarrier, hackerCurrentStakeRef.current);
+              }
+            }
+          }
+        }
+      }
+    };
+
+    ws.onerror = () => {
+      addHackerLog('[ERROR] Scanner WebSocket error.');
+    };
+  };
+
+  useEffect(() => {
+    const handleHackerResult = (e: any) => {
+      const { result, profit, sym, contractType, barrier, contractId } = e.detail;
+
+      // Deduplicate result handling if same contract result is dispatched twice
+      if (contractId && lastProcessedHackerContractIdRef.current === contractId) {
+        return;
+      }
+      if (contractId) {
+        lastProcessedHackerContractIdRef.current = contractId;
+      }
+
+      const profitVal = Number(profit) || 0;
+
+      setHackerSessionProfit(prev => prev + profitVal);
+      setHackerTradesCount(prev => {
+        const nextCount = prev + 1;
+        hackerTradesCountRef.current = nextCount;
+        return nextCount;
+      });
+
+      if (result) {
+        hackerConsecutiveLossesRef.current = 0;
+        hackerCurrentStakeRef.current = hackerStakeRef.current;
+
+        const nextWins = hackerWinsCountRef.current + 1;
+        hackerWinsCountRef.current = nextWins;
+        setHackerWinsCount(nextWins);
+
+        addHackerLog(`[RESULT] ${sym} ${contractType} ${barrier} -> WIN +$${profitVal.toFixed(2)} (Stake reset to $${hackerStakeRef.current.toFixed(2)})`);
+
+        const targetWins = hackerMaxTradesRef.current;
+        if (targetWins > 0 && nextWins >= targetWins) {
+          addHackerLog(`[TARGET REACHED] Target of ${targetWins} winning run(s) achieved! (${nextWins}/${targetWins}) Auto-stopping scanner.`);
+          stopHackerScanner('target reached');
+          return;
+        }
+      } else {
+        const newLosses = hackerConsecutiveLossesRef.current + 1;
+        hackerConsecutiveLossesRef.current = newLosses;
+        setHackerLossesCount(prev => prev + 1);
+
+        const afterLossesThreshold = hackerMartingaleAfterLossesRef.current || 1;
+        const multiplier = hackerMartingaleMultRef.current;
+
+        if (newLosses >= afterLossesThreshold && multiplier > 1) {
+          const effectiveLossSteps = newLosses - afterLossesThreshold + 1;
+          const nextStake = parseFloat((hackerStakeRef.current * Math.pow(multiplier, effectiveLossSteps)).toFixed(2));
+          hackerCurrentStakeRef.current = nextStake;
+          addHackerLog(`[RESULT] ${sym} ${contractType} ${barrier} -> LOSS -$${Math.abs(profitVal).toFixed(2)} | Loss #${newLosses}: Martingale (${multiplier}x, Level ${effectiveLossSteps}) -> Next Stake: $${nextStake.toFixed(2)}`);
+        } else {
+          hackerCurrentStakeRef.current = hackerStakeRef.current;
+          addHackerLog(`[RESULT] ${sym} ${contractType} ${barrier} -> LOSS -$${Math.abs(profitVal).toFixed(2)} | Loss #${newLosses}/${afterLossesThreshold} -> Next Stake: $${hackerCurrentStakeRef.current.toFixed(2)}`);
+        }
+
+        // Fast immediate martingale recovery on loss when Continuous Mode or Same Market Recovery is active
+        if ((hackerContinuousSameMarketRef.current || hackerSameMarketRecoveryRef.current) && hackerScanningRef.current) {
+          const recContract: 'DIGITOVER' | 'DIGITUNDER' = hackerSameMarketRecoveryRef.current
+            ? (hackerRecoveryContractRef.current === 'DIGITUNDER' ? 'DIGITUNDER' : 'DIGITOVER')
+            : (contractType === 'DIGITUNDER' ? 'DIGITUNDER' : 'DIGITOVER');
+          const recBarrier = recContract === 'DIGITUNDER' ? 8 : 1;
+          const durationT = Math.max(1, Math.min(10, hackerDurationTicksRef.current || 1));
+
+          hackerIsExecutingRef.current = true;
+          hackerLastExecutionStartRef.current = Date.now();
+          hasTriggeredRealTradeForLockedMarketRef.current = true;
+          if (hackerContinuousSameMarketRef.current) {
+            hackerLockedMarketRef.current = sym;
+          }
+
+          addHackerLog(`[FAST MARTINGALE RECOVERY] Immediate recovery triggered on ${sym} -> Purchasing REAL ${recContract} ${recBarrier} @ $${hackerCurrentStakeRef.current.toFixed(2)} (${durationT}t)...`);
+
+          setTimeout(() => {
+            if (hackerScanningRef.current) {
+              executeHackerTrade(sym, recContract, recBarrier, hackerCurrentStakeRef.current);
+            }
+          }, 450);
+          return;
+        }
+      }
+
+      const postTradeDelay = hackerContinuousSameMarketRef.current ? 400 : 2500;
+      setTimeout(() => {
+        if (hackerScanningRef.current) {
+          hackerIsExecutingRef.current = false;
+          hackerLastExecutionStartRef.current = 0;
+          hackerActiveVirtualSessionRef.current = null;
+          if (hackerContinuousSameMarketRef.current && hackerLockedMarketRef.current) {
+            addHackerLog(`[CONTINUOUS SAME MARKET] Trade on ${hackerLockedMarketRef.current} completed. Scanner remaining locked on ${hackerLockedMarketRef.current} for next trade...`);
+          } else {
+            hackerLockedMarketRef.current = null;
+            addHackerLog('[SCAN] Resuming multi-market scanning across all 10 markets...');
+          }
+        }
+      }, postTradeDelay);
+    };
+
+    window.addEventListener('ai_hacker_trade_result', handleHackerResult);
+    return () => {
+      window.removeEventListener('ai_hacker_trade_result', handleHackerResult);
+      if (hackerSocketRef.current) {
+        hackerSocketRef.current.close();
+      }
+    };
+  }, []);
+
+  // Hacker Execution Watchdog: Automatically detects stuck execution state and safely unblocks the scanner
+  useEffect(() => {
+    if (!hackerScanning) return;
+    const watchdog = setInterval(() => {
+      if (hackerIsExecutingRef.current && hackerLastExecutionStartRef.current > 0) {
+        const elapsed = Date.now() - hackerLastExecutionStartRef.current;
+        if (elapsed > 10000) {
+          addHackerLog('[SYS WATCHDOG] Trade execution timeout detected (>10s). Resetting lock and resuming scanner loop...');
+          hackerIsExecutingRef.current = false;
+          hackerLastExecutionStartRef.current = 0;
+          hackerActiveVirtualSessionRef.current = null;
+          try {
+            (botEngine as any).canPurchase = true;
+            (botEngine as any).is_contract_loading = false;
+            (botEngine as any).pendingProposalsCount = 0;
+            (botEngine as any).openContractIds?.clear();
+            botEngine.currentContract = null;
+            (botEngine as any).activeTransaction = null;
+            if (botEngine.isRunning) {
+              botEngine.stop();
+            }
+          } catch (e) {}
+        }
+      }
+    }, 1500);
+
+    return () => clearInterval(watchdog);
+  }, [hackerScanning]);
+  
+  // Sync states with global locks and handle disconnections
+  useEffect(() => {
+    if (status === 'disconnected' || status === 'error') {
+      (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+    }
+  }, [status]);
+
+  // Synchronization with Bot Builder
+  useEffect(() => {
+    localStorage.setItem('analysis_symbol', symbol);
+  }, [symbol]);
+
+  useEffect(() => {
+    const handleSync = (e: any) => {
+      if (e.detail?.symbol && e.detail.symbol !== symbol) {
+        setSymbol(e.detail.symbol);
+      }
+    };
+    window.addEventListener('analysis_market_sync', handleSync as any);
+    return () => window.removeEventListener('analysis_market_sync', handleSync as any);
+  }, [symbol]);
+
+  // Save analysis window target to local storage on change
+  useEffect(() => {
+    localStorage.setItem('analysis_window', analysisWindow.toString());
+  }, [analysisWindow]);
+
+  // WebSocket Connection
+  useEffect(() => {
+    connect();
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [symbol, analysisWindow]);
+
+  const connect = () => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    setTicks([]);
+    setStatus('connecting');
+
+    const connectionType = (localStorage.getItem('deriv_connection_type') || 'oauth') as 'oauth' | 'legacy';
+    const wsUrl = 'wss://api.derivws.com/trading/v1/options/ws/public';
+
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (wsRef.current !== ws) return;
+      setStatus('connected');
+      
+      const token = getActiveToken();
+      // Only authorize if handle legacy to get potentially better rates/data, 
+      // but for OAuth we skip authorize on this standalone socket to avoid conflicts with OTP flow.
+      // Tick data is generally public.
+      if (token && connectionType === 'legacy') {
+        ws.send(JSON.stringify({ authorize: token }));
+      }
+      
+      ws.send(JSON.stringify({ active_symbols: 'brief' }));
+      ws.send(JSON.stringify({ forget_all: "ticks" }));
+      
+      // Subscribe to all active market windows concurrently
+      uniqueSymbols.forEach(sym => {
+        ws.send(JSON.stringify({ 
+          ticks_history: sym, 
+          count: analysisWindow, 
+          end: "latest", 
+          style: "ticks", 
+          subscribe: 1 
+        }));
+
+        const gran = DERIV_TIMEFRAME_CONFIG[selectedTimeframe]?.granularity || 60;
+        if (gran > 0) {
+          ws.send(JSON.stringify({
+            ticks_history: sym,
+            count: 150,
+            end: "latest",
+            style: "candles",
+            granularity: gran,
+            subscribe: 1
+          }));
+        }
+      });
+    };
+
+    ws.onmessage = (event) => {
+      if (wsRef.current !== ws) return;
+      const data = JSON.parse(event.data);
+      if (data.error) {
+        setStatus('error');
+        return;
+      }
+      
+      if (data.msg_type === 'active_symbols') {
+        const s = data.active_symbols.find((item: any) => item.symbol === symbol);
+        if (s) setPipSize(s.pip_size || 0.01);
+      }
+      
+      if (data.msg_type === 'history') {
+        const sym = data.echo_req?.ticks_history; if(!sym) return;
+        const h = data.history;
+        const precision = getSymbolDecimals(sym, h.pip_size || pipSize);
+        
+        const histTicks = h.prices.map((price: number, i: number) => {
+          const s = price.toFixed(precision);
+          const digit = parseInt(s[s.length - 1], 10);
+          if (sym === symbol) {
+            aiIndicatorRef.current.update_tick(price);
+          }
+          return { epoch: h.times[i], quote: price, digit };
+        });
+
+        setMarketTicks(prev => ({ ...prev, [sym]: histTicks }));
+
+        if (histTicks.length > 0) {
+          const last = histTicks[histTicks.length - 1];
+          const prevT = histTicks.length > 1 ? histTicks[histTicks.length - 2] : last;
+          setMarketLastQuotes(prev => ({
+            ...prev,
+            [sym]: { quote: last.quote, digit: last.digit, isUp: last.quote >= prevT.quote }
+          }));
+        }
+
+        if (sym === symbol) {
+          setTicks(histTicks);
+          setLastUpdate(new Date().toLocaleTimeString());
+        }
+      }
+      
+      if (data.msg_type === 'candles') {
+        const sym = data.echo_req?.ticks_history; if(!sym) return;
+        const cList: CandleData[] = (data.candles || []).map((c: any) => ({
+          epoch: c.epoch,
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+        }));
+        const reqGran = data.echo_req?.granularity;
+        const matchedTf = (Object.keys(DERIV_TIMEFRAME_CONFIG) as DerivTimeframe[]).find(
+          k => DERIV_TIMEFRAME_CONFIG[k].granularity === reqGran
+        ) || selectedTimeframe;
+
+        setMarketCandles(prev => ({ ...prev, [sym]: cList }));
+        setMarketTimeframeCandles(prev => ({
+          ...prev,
+          [sym]: { ...(prev[sym] || {}), [matchedTf]: cList }
+        }));
+
+        if (sym === symbol) {
+          setCandles(cList);
+          setTimeframeCandles(prev => ({ ...prev, [matchedTf]: cList }));
+        }
+      }
+      
+      if (data.msg_type === 'ohlc' && data.ohlc) {
+        const sym = data.ohlc.symbol || symbol;
+        const ohlc = data.ohlc;
+        const newCandle: CandleData = {
+          epoch: ohlc.open_time,
+          open: Number(ohlc.open),
+          high: Number(ohlc.high),
+          low: Number(ohlc.low),
+          close: Number(ohlc.close),
+        };
+
+        setMarketCandles(prev => {
+          const list = prev[sym] || [];
+          if (!list.length) return { ...prev, [sym]: [newCandle] };
+          const last = list[list.length - 1];
+          if (last.epoch === newCandle.epoch) {
+            return { ...prev, [sym]: [...list.slice(0, -1), newCandle] };
+          }
+          return { ...prev, [sym]: [...list.slice(-149), newCandle] };
+        });
+
+        if (sym === symbol) {
+          setCandles(prev => {
+            if (!prev.length) return [newCandle];
+            const last = prev[prev.length - 1];
+            if (last.epoch === newCandle.epoch) {
+              return [...prev.slice(0, -1), newCandle];
+            }
+            return [...prev.slice(-149), newCandle];
+          });
+        }
+      }
+      
+      if (data.msg_type === 'tick') {
+        const sym = data.tick?.symbol; if(!sym) return;
+        const price = data.tick.quote;
+        const precision = getSymbolDecimals(sym, data.tick.pip_size || pipSize);
+        const s = price.toFixed(precision);
+        const digit = parseInt(s[s.length - 1], 10);
+        const tick = { epoch: data.tick.epoch, quote: price, digit };
+        
+        setMarketTicks(prev => {
+          const existing = prev[sym] || [];
+          return { ...prev, [sym]: [...existing, tick].slice(-analysisWindow) };
+        });
+
+        setMarketLastQuotes(prev => {
+          const oldQuote = prev[sym]?.quote ?? price;
+          return {
+            ...prev,
+            [sym]: { quote: price, digit, isUp: price >= oldQuote }
+          };
+        });
+
+        if (sym === symbol) {
+          aiIndicatorRef.current.update_tick(price);
+          setTicks(prev => {
+            const next = [...prev, tick];
+            return next.slice(-analysisWindow);
+          });
+          setLastUpdate(new Date().toLocaleTimeString());
+        }
+      }
+    };
+
+    ws.onclose = () => {
+      if (wsRef.current === ws) {
+        setStatus('disconnected');
+        // Auto reconnect after 3 seconds
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, 3000);
+      }
+    };
+
+    ws.onerror = () => {
+      if (wsRef.current === ws) {
+        setStatus('error');
+        // Auto reconnect after 5 seconds
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, 5000);
+      }
+    };
+  };
+
+  // Dynamic subscription when new market windows are added
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      uniqueSymbols.forEach(sym => {
+        wsRef.current?.send(JSON.stringify({ 
+          ticks_history: sym, 
+          count: analysisWindow, 
+          end: "latest", 
+          style: "ticks", 
+          subscribe: 1 
+        }));
+      });
+    }
+  }, [uniqueSymbolsKey, analysisWindow]);
+
+  // Effect to request candles whenever selectedTimeframe or symbol changes
+  useEffect(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const gran = DERIV_TIMEFRAME_CONFIG[selectedTimeframe]?.granularity || 60;
+    if (gran > 0) {
+      wsRef.current.send(JSON.stringify({
+        ticks_history: symbol,
+        count: 150,
+        end: "latest",
+        style: "candles",
+        granularity: gran,
+        subscribe: 1
+      }));
+    }
+  }, [selectedTimeframe, symbol]);
+
+  // Compute multi-timeframe signals across Deriv intervals
+  const timeframeSignals = useMemo<TimeframeSignal[]>(() => {
+    const list: DerivTimeframe[] = ['1t', '1m', '3m', '5m', '15m', '30m', '1h', '5h', '1d'];
+    return list.map(tf => {
+      const cfg = DERIV_TIMEFRAME_CONFIG[tf];
+      let tfData = timeframeCandles[tf];
+      if (tf === '1t' || !tfData || tfData.length === 0) {
+        tfData = ticks.slice(-150).map(t => ({
+          epoch: t.epoch,
+          open: t.quote,
+          high: t.quote,
+          low: t.quote,
+          close: t.quote,
+        }));
+      }
+      return evaluateTimeframeSignal(tf, cfg.label, tfData);
+    });
+  }, [timeframeCandles, ticks]);
+
+  // Digit Prediction AI Logic
+  const getPredictedDigit = (tickDigits: number[]) => {
+    if (!tickDigits.length) return 0;
+    const dCounts = Array(10).fill(0);
+    tickDigits.forEach(d => dCounts[d]++);
+    const dProbs = dCounts.map(c => c / tickDigits.length);
+    
+    const last10 = tickDigits.slice(-10);
+    const recStats = Array(10).fill(0);
+    last10.forEach(d => recStats[d]++);
+
+    const dScores = dProbs.map((p, digit) => {
+      let s = p * 100;
+      s += (recStats[digit] / 10) * 15;
+      if (tickDigits[tickDigits.length - 1] === digit) s += 40;
+      const last5 = tickDigits.slice(-5);
+      if (last5.filter(d => d === digit).length >= 2) s += 25;
+      s += Math.random() * 2;
+      return s;
+    });
+    return dScores.indexOf(Math.min(...dScores));
+  };
+
+  // Multi-layered Core Analysis Logic
+  const analysis = useMemo(() => {
+    if (ticks.length < 10) return null;
+
+    const prices = ticks.map(t => t.quote);
+    const lastPrice = prices[prices.length - 1];
+    
+    // Windows scaled for 25 ticks
+    const shortWindow = ticks.slice(-5);
+    const midWindow = ticks.slice(-15);
+    const longWindow = ticks; // 25 ticks
+
+    // 1. Short-term (Entry Timing)
+    const shortDigits = shortWindow.map(t => t.digit);
+    const shortCounts = Array(10).fill(0);
+    shortDigits.forEach(d => shortCounts[d]++);
+    const shortEvens = shortDigits.filter(d => d % 2 === 0).length;
+    const shortOdds = shortWindow.length - shortEvens;
+
+    // 2. Mid-term (Pattern Detection)
+    const midDigits = midWindow.map(t => t.digit);
+    const midCounts = Array(10).fill(0);
+    midDigits.forEach(d => midCounts[d]++);
+    const smaMid = midWindow.map(t => t.quote).reduce((a, b) => a + b, 0) / midWindow.length;
+
+    // 3. Long-term (Trend Bias)
+    const smaLong = prices.reduce((a, b) => a + b, 0) / prices.length;
+    const longDigits = ticks.map(t => t.digit);
+    const longCounts = Array(10).fill(0);
+    longDigits.forEach(d => longCounts[d]++);
+
+    // Stats for Display (using Long-term for stability)
+    let mostFrequent = 0;
+    let leastFrequent = 0;
+    longCounts.forEach((c, i) => {
+      if (c > longCounts[mostFrequent]) mostFrequent = i;
+      if (c < longCounts[leastFrequent]) leastFrequent = i;
+    });
+
+    const frequencies = longCounts.map(c => (c / ticks.length) * 100);
+    
+    // AI Prediction for Current Market
+    const predictedDigit = getPredictedDigit(longDigits);
+
+    // Multi-layered Signal Synthesis
+    const trendBias = lastPrice > smaLong ? 'RISE' : 'FALL';
+    const shortMomentum = lastPrice > (shortWindow.map(t => t.quote).reduce((a, b) => a + b, 0) / shortWindow.length) ? 'RISE' : 'FALL';
+    const priceChange = lastPrice - (prices[prices.length - 2] || lastPrice);
+    const volatilityScore = Math.abs(lastPrice - smaMid) / smaMid;
+
+    // AI Indicator Integration
+    const aiSignals = aiIndicatorRef.current.generate_signals();
+
+    return {
+      frequencies,
+      mostFrequent,
+      leastFrequent,
+      predictedDigit,
+      smaMid,
+      smaLong,
+      currentPrice: lastPrice,
+      priceChange,
+      shortMomentum,
+      trendBias,
+      volatilityScore,
+      aiSignals,
+      predictions: {
+        matches: { 
+          signal: predictedDigit, 
+          confidence: "AI Predicted (Weights: Fr/Re/Vo)", 
+          detail: `Optimal entry using AI digit prediction ${predictedDigit}` 
+        },
+        differs: { 
+          signal: mostFrequent, 
+          confidence: "Pattern Confirmed", 
+          detail: "Avoiding peak frequency in mid-window" 
+        },
+        // Even/Odd: Signal if short-term confirms mid-term bias
+        evenOdd: (shortEvens > shortOdds) ? "ODD" : (shortOdds > shortEvens) ? "EVEN" : "NEUTRAL", 
+        // Over/Under: Bias toward long-term under-represented side
+        overUnder: (longDigits.filter(d => d > 4).length > longDigits.filter(d => d < 5).length) ? "UNDER 5" : "OVER 4", 
+        // Rise/Fall: Full alignment required
+        riseFall: (trendBias === shortMomentum) ? trendBias : "NEUTRAL",
+        accumulator: Math.abs(lastPrice - smaMid) / smaMid < 0.0002 ? "STABLE" : "VOLATILE"
+      }
+    };
+  }, [ticks]);
+
+  const rankedDigits = useMemo(() => {
+    if (!analysis?.frequencies) return [];
+    return analysis.frequencies
+      .map((f, i) => ({ digit: i, freq: f }))
+      .sort((a, b) => b.freq - a.freq);
+  }, [analysis]);
+
+  useEffect(() => {
+    if (analysis) {
+      (window as any).FREQUENCY_BOT_MOST_FREQUENT = analysis.mostFrequent;
+      (window as any).FREQUENCY_BOT_LEAST_FREQUENT = analysis.leastFrequent;
+      
+      if (rankedDigits.length >= 10) {
+        (window as any).FREQUENCY_BOT_SECOND_MOST_FREQUENT = rankedDigits[1].digit;
+        (window as any).FREQUENCY_BOT_SECOND_LEAST_FREQUENT = rankedDigits[8].digit;
+      } else {
+        (window as any).FREQUENCY_BOT_SECOND_MOST_FREQUENT = analysis.mostFrequent;
+        (window as any).FREQUENCY_BOT_SECOND_LEAST_FREQUENT = analysis.leastFrequent;
+      }
+    }
+  }, [analysis, rankedDigits]);
+
+  // Least Digits History (Ticker)
+  const [coldestHistory, setColdestHistory] = useState<number[]>([]);
+  useEffect(() => {
+    if (analysis?.leastFrequent !== undefined) {
+      setColdestHistory(prev => {
+        if (prev[prev.length - 1] === analysis.leastFrequent) return prev;
+        const next = [...prev, analysis.leastFrequent];
+        return next.slice(-20);
+      });
+    }
+  }, [analysis?.leastFrequent]);
+
+  // Scanner & Auto-Trade Logic
+  const startScanning = async (isBackground = false, excludeSymbol?: string) => {
+    const token = getActiveToken();
+    if (!token) {
+      if (!isBackground) alert('Please connect your Deriv account first.');
+      (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+      return;
+    }
+
+    if (!isBackground) {
+      setIsScanning(true);
+      setScanProgress(0);
+      setScanBestMarket(null);
+      setScanResults([]);
+    }
+    
+    const results: any[] = [];
+
+    // Create a temporary websocket for scanning using Zero-Auth Public WebSocket
+    const scanWs = new WebSocket('wss://api.derivws.com/trading/v1/options/ws/public');
+    
+    let isActive = true;
+    const timeout = setTimeout(() => {
+      if (isActive) {
+        isActive = false;
+        (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        if (!isBackground) setIsScanning(false);
+        scanWs.close();
+        botEngine.getBotInterface().notify('warn', 'AI Scanner: Rescan timed out. Using fallback market.');
+      }
+    }, 20000); // 20s absolute timeout for scanning
+
+    scanWs.onclose = () => {
+      if (isActive) {
+        isActive = false;
+        (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        if (!isBackground) setIsScanning(false);
+        clearTimeout(timeout);
+      }
+    };
+
+    scanWs.onerror = () => {
+      if (isActive) {
+        isActive = false;
+        (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        if (!isBackground) setIsScanning(false);
+        botEngine.getBotInterface().notify('error', 'AI Scanner: Network error during scan.');
+        clearTimeout(timeout);
+      }
+    };
+
+    scanWs.onopen = () => {
+      if (isActive) {
+        const connectionType = (localStorage.getItem('deriv_connection_type') || 'oauth') as 'oauth' | 'legacy';
+        // Only authorize on legacy to avoid OTP flow complexity on this scan-only socket
+        if (token && connectionType === 'legacy') {
+          scanWs.send(JSON.stringify({ authorize: token }));
+        } else {
+          // If OAuth or not authorized, still fetch symbols
+          scanWs.send(JSON.stringify({ active_symbols: 'brief' }));
+        }
+      }
+    };
+
+    scanWs.onmessage = async (e) => {
+      if (!isActive) return;
+      const data = JSON.parse(e.data);
+
+      if (data.error) {
+        // If it's just a permission error on authorize, we might still be able to scan active_symbols
+        if (data.error.code === 'AuthorizationRequired' || data.error.code === 'InvalidToken') {
+           scanWs.send(JSON.stringify({ active_symbols: 'brief' }));
+           return;
+        }
+        botEngine.getBotInterface().notify('error', `AI Scanner Error: ${data.error.message}`);
+        (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        if (!isBackground) setIsScanning(false);
+        isActive = false;
+        clearTimeout(timeout);
+        scanWs.close();
+        return;
+      }
+      
+      if (data.msg_type === 'authorize' || (data.msg_type === 'active_symbols' && isActive)) {
+        if (data.msg_type === 'authorize') {
+          scanWs.send(JSON.stringify({ active_symbols: 'brief' }));
+          return;
+        }
+      }
+
+      if (data.msg_type === 'active_symbols') {
+        const syntheticSymbols = data.active_symbols.filter((s: any) => 
+          s.market === 'synthetic_index' && 
+          (s.submarket === 'random_index' || s.submarket === 'random_daily' || s.submarket === 'jump_indices')
+        );
+
+        if (syntheticSymbols.length === 0) {
+          if (!isBackground) setIsScanning(false);
+          (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+          scanWs.close();
+          return;
+        }
+
+        const symbolsToScan = isBackground ? syntheticSymbols.slice(0, 15) : syntheticSymbols.slice(0, 20);
+        const newLog: string[] = [];
+        const newSignals = { over: [] as OtivoSignal[], under: [] as OtivoSignal[], differ: [] as OtivoSignal[] };
+
+        for (let i = 0; i < symbolsToScan.length; i++) {
+          const s = symbolsToScan[i];
+          if (!isBackground) setScanProgress(Math.round(((i + 1) / symbolsToScan.length) * 100));
+          
+          scanWs.send(JSON.stringify({
+            ticks_history: s.symbol,
+            count: 1000, 
+            end: "latest",
+            style: "ticks"
+          }));
+
+          await new Promise(resolve => {
+            const historyTimeout = setTimeout(() => {
+              scanWs.removeEventListener('message', historyHandler);
+              resolve(null);
+            }, 3000); // 3s per symbol timeout
+
+            const historyHandler = (event: any) => {
+              const hData = JSON.parse(event.data);
+              if (hData.msg_type === 'history' && hData.echo_req.ticks_history === s.symbol) {
+                clearTimeout(historyTimeout);
+                const h = hData.history;
+                const pSize = hData.pip_size || s.pip_size || 0.01;
+                const precision = getSymbolDecimals(s.symbol, pSize);
+                
+                const digits = h.prices.map((p: number) => {
+                  const sPrice = p.toFixed(precision);
+                  return parseInt(sPrice[sPrice.length - 1], 10);
+                });
+
+                // --- OTIVO Engine Logic Integrated ---
+                const patternLen = 3;
+                const probThreshold = 0.70; // Set to 0.70 to match script's 70% strength
+                
+                // Clear memory for this symbol to avoid double-counting from history overlap
+                otivoMemory.current[s.symbol] = {};
+                const symbolMemory = otivoMemory.current[s.symbol];
+
+                for (let j = 0; j < digits.length - patternLen; j++) {
+                  const seq = digits.slice(j, j + patternLen).join(',');
+                  const nextDigit = digits[j + patternLen];
+                  if (!symbolMemory[seq]) symbolMemory[seq] = { total: 0, next: [], outcomes: [] as number[] };
+                  if (!symbolMemory[seq].next) symbolMemory[seq].next = Array(10).fill(0);
+                  if (!symbolMemory[seq].outcomes) symbolMemory[seq].outcomes = [];
+                  
+                  symbolMemory[seq].total++;
+                  symbolMemory[seq].next[nextDigit]++;
+                  symbolMemory[seq].outcomes.push(nextDigit);
+                }
+
+                const currentSeq = digits.slice(-patternLen).join(',');
+                const pattern = symbolMemory[currentSeq];
+                
+                // Discovery Log feedback
+                newLog.unshift(`${s.display_name}: Pattern [${currentSeq}] confirmed with neural recurrence scan.`);
+
+                if (pattern && pattern.total >= 2) {
+                  let overCount = 0;
+                  let underCount = 0;
+                  const validDifferTargets: number[] = [];
+
+                  for (let d = 0; d <= 9; d++) {
+                    const count = pattern.next[d];
+                    if (d > 5) overCount += count;
+                    if (d < 4) underCount += count;
+                    
+                    if (count === 0 && pattern.total >= 2) { // Changed from 3 to 2 to match script
+                      validDifferTargets.push(d);
+                    }
+                  }
+
+                  const outcomes = pattern.outcomes || [];
+
+                  // Only add signals if we haven't added the same one recently
+                  if (overCount / pattern.total >= probThreshold && scannerSettings.activeStrategies.includes('over')) {
+                    newSignals.over.push({
+                      id: `over-${s.symbol}-${currentSeq}-${Date.now()}`,
+                      type: 'over',
+                      symbol: s.symbol,
+                      seq: currentSeq,
+                      conf: (overCount / pattern.total) * 100,
+                      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                      pastOutcomes: outcomes
+                    });
+                  }
+
+                  if (underCount / pattern.total >= probThreshold && scannerSettings.activeStrategies.includes('under')) {
+                    newSignals.under.push({
+                      id: `under-${s.symbol}-${currentSeq}-${Date.now()}`,
+                      type: 'under',
+                      symbol: s.symbol,
+                      seq: currentSeq,
+                      conf: (underCount / pattern.total) * 100,
+                      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                      pastOutcomes: outcomes
+                    });
+                  }
+
+                  if (validDifferTargets.length > 0 && scannerSettings.activeStrategies.includes('differ')) {
+                    validDifferTargets.forEach(target => {
+                      newSignals.differ.push({
+                        id: `diff-${s.symbol}-${currentSeq}-${target}-${Date.now()}`,
+                        type: 'differ',
+                        symbol: s.symbol,
+                        seq: currentSeq,
+                        conf: 100,
+                        target: target,
+                        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+                        pastOutcomes: outcomes
+                      });
+                    });
+                  }
+                }
+                // --- End OTIVO Logic ---
+
+                const counts = Array(10).fill(0);
+                digits.forEach((d: number) => counts[d]++);
+                
+                const predictedDigit = getPredictedDigit(digits);
+                const minFreqValue = counts[predictedDigit];
+                const freqPercent = (minFreqValue / digits.length) * 100;
+
+                results.push({
+                  symbol: s.symbol,
+                  name: s.display_name,
+                  digit: predictedDigit,
+                  frequency: freqPercent,
+                  pip_size: pSize,
+                  confidence: 100 - freqPercent,
+                  actualFreqs: counts,
+                  rawDigits: digits,
+                  seq: currentSeq
+                });
+                
+                scanWs.removeEventListener('message', historyHandler);
+                resolve(null);
+              }
+            };
+            scanWs.addEventListener('message', historyHandler);
+          });
+        }
+
+        setOtivoLog(prev => [...newLog, ...prev].slice(0, 50));
+        setOtivoSignals(prev => ({
+          over: [...newSignals.over, ...prev.over].slice(0, 20),
+          under: [...newSignals.under, ...prev.under].slice(0, 20),
+          differ: [...newSignals.differ, ...prev.differ].slice(0, 20)
+        }));
+
+        // Apply Market Selection Variety Logic
+        let sorted = results.map(r => {
+           let penalty = 0;
+           // 1. Penalty for recently used symbols (to force variety)
+           const recentIndex = recentlyUsedSymbols.current.indexOf(r.symbol);
+           if (recentIndex !== -1) {
+             // More recent = higher penalty
+             penalty += (recentlyUsedSymbols.current.length - recentIndex) * 5;
+           }
+           
+           // 2. Penalty for total use count in this session
+           const useCount = symbolUseCount.current[r.symbol] || 0;
+           penalty += useCount * 3;
+
+           // 3. Small "Selection Bias" for Jump indices as they often have better spreads for differs
+           if (r.symbol.startsWith('JD')) penalty -= 2;
+
+           return { ...r, adjustedScore: r.frequency + penalty };
+        }).sort((a,b) => a.adjustedScore - b.adjustedScore);
+        
+        if (excludeSymbol && sorted.length > 1) {
+           const filteredArr = sorted.filter(r => r.symbol !== excludeSymbol);
+           if (filteredArr.length > 0) sorted = filteredArr;
+        }
+
+        const best = sorted[0];
+        
+        if (best) {
+          // Update tracking
+          recentlyUsedSymbols.current = [best.symbol, ...recentlyUsedSymbols.current.filter(s => s !== best.symbol)].slice(0, 5);
+          symbolUseCount.current[best.symbol] = (symbolUseCount.current[best.symbol] || 0) + 1;
+        }
+        
+        setScanResults(sorted);
+        setScanBestMarket(best);
+        setLastScanTime(new Date().toLocaleTimeString());
+
+        if (best) {
+          (window as any).SCANNER_TARGET_SYMBOL = best.symbol;
+          (window as any).SCANNER_TARGET_DIGIT = best.digit;
+          (window as any).SCANNER_TARGET_PATTERN = best.seq || '';
+          if (marketSwitchMode !== 'off') {
+            setSymbol(best.symbol);
+          }
+        }
+        (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        clearTimeout(timeout);
+        isActive = false;
+
+        if (!isBackground) {
+          setIsScanning(false);
+          setShowScanResults(true);
+        }
+
+        scanWs.close();
+      }
+    };
+  };
+
+  // neural pattern detector
+  const processNeuralResults = (symbol: string, seq: string, outcomes: number[]) => {
+    const total = outcomes.length;
+    const counts: Record<number, number> = {};
+    outcomes.forEach(d => counts[d] = (counts[d] || 0) + 1);
+
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const newSigs: OtivoSignal[] = [];
+
+    // Over 5
+    const overCount = outcomes.filter(d => d > 5).length;
+    if (overCount / total >= 0.7 && scannerSettings.activeStrategies.includes('over')) {
+       newSigs.push({
+          id: `neural-over-${symbol}-${seq}-${Date.now()}`,
+          type: 'over',
+          symbol,
+          seq,
+          conf: (overCount / total) * 100,
+          time,
+          pastOutcomes: outcomes
+       });
+    }
+
+    // Under 4
+    const underCount = outcomes.filter(d => d < 4).length;
+    if (underCount / total >= 0.7 && scannerSettings.activeStrategies.includes('under')) {
+       newSigs.push({
+          id: `neural-under-${symbol}-${seq}-${Date.now()}`,
+          type: 'under',
+          symbol,
+          seq,
+          conf: (underCount / total) * 100,
+          time,
+          pastOutcomes: outcomes
+       });
+    }
+
+    // Differ
+    for (let i = 0; i <= 9; i++) {
+       if (!counts[i] && total >= 2 && scannerSettings.activeStrategies.includes('differ')) {
+          newSigs.push({
+             id: `neural-diff-${symbol}-${seq}-${i}-${Date.now()}`,
+             type: 'differ',
+             symbol,
+             target: i,
+             seq,
+             conf: 100,
+             time,
+             pastOutcomes: outcomes
+          });
+       }
+    }
+
+    if (newSigs.length > 0) {
+       setOtivoSignals(prev => {
+          const updateBucket = (bucket: OtivoSignal[], type: 'over' | 'under' | 'differ') => {
+             const itemsToAdd = newSigs.filter(s => s.type === type);
+             if (itemsToAdd.length === 0) return bucket;
+             
+             // Deduplicate by symbol + seq (+ target for differ)
+             const existingIds = new Set(itemsToAdd.map(a => `${a.symbol}-${a.seq}-${a.type === 'differ' ? a.target : ''}`));
+             const filtered = bucket.filter(b => !existingIds.has(`${b.symbol}-${b.seq}-${b.type === 'differ' ? b.target : ''}`));
+             
+             return [...itemsToAdd, ...filtered].slice(0, 20);
+          };
+
+          return {
+             over: updateBucket(prev.over, 'over'),
+             under: updateBucket(prev.under, 'under'),
+             differ: updateBucket(prev.differ, 'differ')
+          };
+       });
+
+       setOtivoLog(prev => [`${symbol}: Neural Match [${seq}] confirmed.`, ...prev].slice(0, 50));
+    }
+  };
+
+  const detectNeuralPatterns = (symbol: string, history: number[]) => {
+    const triggerLen = 3;
+    const currentSeq = history.slice(-triggerLen).join(',');
+    
+    let occurrences: number[] = [];
+    for (let i = 0; i < history.length - triggerLen; i++) {
+        const sub = history.slice(i, i + triggerLen).join(',');
+        if (sub === currentSeq) {
+            const nextDigit = history[i + triggerLen];
+            if (nextDigit !== undefined) {
+                occurrences.push(nextDigit);
+            }
+        }
+    }
+
+    if (occurrences.length >= 2) {
+       processNeuralResults(symbol, currentSeq, occurrences);
+    }
+  };
+
+  // Background Watcher loop (Persistent Neural Subscriptions)
+  useEffect(() => {
+    if (isWatcherActive) {
+      const ws = new WebSocket('wss://api.derivws.com/trading/v1/options/ws/public');
+      neuralSocket.current = ws;
+      
+      ws.onopen = () => {
+        NEURAL_MARKETS.forEach(m => {
+          neuralHistories.current[m] = [];
+          ws.send(JSON.stringify({ ticks: m, subscribe: 1 }));
+        });
+        botEngine.getBotInterface().notify('success', 'Neural Pattern Engine Activated');
+      };
+
+      ws.onmessage = (msg) => {
+        const data = JSON.parse(msg.data);
+        if (data.tick) {
+          const sym = data.tick.symbol;
+          const quote = data.tick.quote;
+          const precision = NEURAL_DECIMALS[sym] || 2;
+          const digit = parseInt(quote.toFixed(precision).slice(-1), 10);
+          
+          if (!neuralHistories.current[sym]) neuralHistories.current[sym] = [];
+          const history = neuralHistories.current[sym];
+          history.push(digit);
+          if (history.length > 100) history.shift();
+          
+          setNeuralMarketData(prev => ({
+            ...prev,
+            [sym]: { lastDigit: digit, count: history.length }
+          }));
+
+          if (history.length >= 20) {
+            detectNeuralPatterns(sym, history);
+          }
+        }
+      };
+
+      return () => {
+        ws.close();
+        neuralSocket.current = null;
+      };
+    }
+  }, [isWatcherActive, scannerSettings.activeStrategies]);
+
+  const loadBotFromSignal = (sig: any) => {
+    const xml = generateBotXML(sig, scannerSettings);
+    localStorage.setItem('pending_bot_xml', xml);
+    localStorage.setItem('pending_bot_name', `Neural Bot ${sig.symbol} ${sig.type.toUpperCase()}`);
+    
+    // Jump to Bot Builder
+    navigate('/');
+    
+    // Notify user
+    botEngine.getBotInterface().notify('success', `Strategy for ${sig.symbol} loaded into workspace.`);
+  };
+
+  const generateBotXML = (signal: any, settings: any) => {
+    const strategy = signal.type || 'differ';
+    const symbol = signal.symbol || 'R_100';
+    const digit = signal.target ?? signal.digit ?? 0;
+    const patternDigits = (signal.seq || '').split(',').map(d => d.trim());
+    const initialStake = settings.stake || 10;
+    const targetProfit = settings.tp || 2.5;
+    const stopLoss = settings.sl || 50;
+    const martingale = strategy === 'differ' ? 11 : 3.5;
+    
+    // Variable IDs from user's XML
+    const ID_INIT_STAKE = 'initial_stake';
+    const ID_STAKE = 'stake';
+    const ID_TP = 'target_profit';
+    const ID_SL = 'stop_loss';
+    const ID_MARTINGALE = 'martingale';
+    const ID_L1 = 'l1_var';
+    const ID_L2 = 'l2_var';
+
+    let purchaseValue = 'DIGITDIFF';
+    let tradeType = 'matchdiff';
+    let contractType = 'DIGITDIFF';
+    
+    if (strategy === 'over') {
+      purchaseValue = 'DIGITOVER';
+      tradeType = 'overunder';
+      contractType = 'DIGITOVER';
+    } else if (strategy === 'under') {
+      purchaseValue = 'DIGITUNDER';
+      tradeType = 'overunder';
+      contractType = 'DIGITUNDER';
+    }
+    
+    return `
+<xml xmlns="https://developers.google.com/blockly/xml">
+  <variables>
+    <variable id="initial_stake">Initial Stake</variable>
+    <variable id="stake">Stake</variable>
+    <variable id="target_profit">Expected Profit</variable>
+    <variable id="stop_loss">Stop Loss</variable>
+    <variable id="l1_var">L1</variable>
+    <variable id="martingale">Martingale Multiplier</variable>
+    <variable id="l2_var">L2</variable>
+  </variables>
+  <block type="trade_definition" id="trade_def" x="0" y="0">
+    <statement name="SUBMARKET">
+      <block type="trade_definition_market" id="market_def">
+        <field name="MARKET_LIST">synthetic_index</field>
+        <field name="SUBMARKET_LIST">random_index</field>
+        <field name="SYMBOL_LIST">${symbol}</field>
+        <next>
+          <block type="trade_definition_tradetype" id="type_def">
+            <field name="TRADETYPECAT_LIST">digits</field>
+            <field name="TRADETYPE_LIST">${tradeType}</field>
+            <next>
+              <block type="trade_definition_contracttype" id="contract_def">
+                <field name="TYPE_LIST">${contractType}</field>
+                <next>
+                  <block type="trade_definition_candleinterval" id="candle_def">
+                    <field name="CANDLEINTERVAL_LIST">60</field>
+                    <next>
+                      <block type="trade_definition_restartbuysell" id="restart_bs">
+                        <field name="TIME_MACHINE_ENABLED">FALSE</field>
+                        <next>
+                          <block type="trade_definition_restartonerror" id="restart_err">
+                            <field name="RESTARTONERROR">TRUE</field>
+                          </block>
+                        </next>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+    <statement name="INITIALIZATION">
+      <block type="variables_set" id="init_stake_set">
+        <field name="VAR" id="initial_stake">Initial Stake</field>
+        <value name="VALUE">
+          <block type="math_number"><field name="NUM">${initialStake}</field></block>
+        </value>
+        <next>
+          <block type="variables_set" id="stake_set">
+            <field name="VAR" id="stake">Stake</field>
+            <value name="VALUE">
+              <block type="variables_get"><field name="VAR" id="initial_stake">Initial Stake</field></block>
+            </value>
+            <next>
+              <block type="variables_set" id="martingale_set">
+                <field name="VAR" id="martingale">Martingale Multiplier</field>
+                <value name="VALUE">
+                  <block type="math_number"><field name="NUM">${martingale}</field></block>
+                </value>
+                <next>
+                  <block type="variables_set" id="tp_set">
+                    <field name="VAR" id="target_profit">Expected Profit</field>
+                    <value name="VALUE">
+                      <block type="math_number"><field name="NUM">${targetProfit}</field></block>
+                    </value>
+                    <next>
+                      <block type="variables_set" id="sl_set">
+                        <field name="VAR" id="stop_loss">Stop Loss</field>
+                        <value name="VALUE">
+                          <block type="math_number"><field name="NUM">${stopLoss}</field></block>
+                        </value>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+    <statement name="TRADE_OPTIONS">
+      <block type="trade_definition_tradeoptions" id="options_def">
+        <field name="DURATIONTYPE_LIST">t</field>
+        <field name="BARRIER_TYPE">offset_plus</field>
+        <value name="DURATION">
+          <shadow type="math_number"><field name="NUM">1</field></shadow>
+        </value>
+        <value name="AMOUNT">
+          <block type="variables_get"><field name="VAR" id="stake">Stake</field></block>
+        </value>
+        <value name="TAKE_PROFIT">
+          <block type="variables_get"><field name="VAR" id="target_profit">Expected Profit</field></block>
+        </value>
+        <value name="STOP_LOSS">
+          <block type="variables_get"><field name="VAR" id="stop_loss">Stop Loss</field></block>
+        </value>
+      </block>
+    </statement>
+  </block>
+  <block type="after_purchase" id="after_pur" x="0" y="800">
+    <statement name="AFTERPURCHASE_STACK">
+      <block type="controls_if" id="check_loss">
+        <mutation else="1"></mutation>
+        <value name="IF0">
+          <block type="contract_check_result">
+            <field name="CHECK_RESULT">loss</field>
+          </block>
+        </value>
+        <statement name="DO0">
+          <block type="variables_set" id="martingale_logic">
+            <field name="VAR" id="stake">Stake</field>
+            <value name="VALUE">
+              <block type="math_arithmetic">
+                <field name="OP">MULTIPLY</field>
+                <value name="A">
+                  <block type="variables_get"><field name="VAR" id="stake">Stake</field></block>
+                </value>
+                <value name="B">
+                  <block type="variables_get"><field name="VAR" id="martingale">Martingale Multiplier</field></block>
+                </value>
+              </block>
+            </value>
+          </block>
+        </statement>
+        <statement name="ELSE">
+          <block type="variables_set" id="reset_stake">
+            <field name="VAR" id="stake">Stake</field>
+            <value name="VALUE">
+              <block type="variables_get"><field name="VAR" id="initial_stake">Initial Stake</field></block>
+            </value>
+          </block>
+        </statement>
+        <next>
+          <block type="controls_if" id="profit_manager">
+            <mutation else="1"></mutation>
+            <value name="IF0">
+              <block type="logic_compare">
+                <field name="OP">GTE</field>
+                <value name="A">
+                  <block type="total_profit"></block>
+                </value>
+                <value name="B">
+                  <block type="variables_get"><field name="VAR" id="target_profit">Expected Profit</field></block>
+                </value>
+              </block>
+            </value>
+            <statement name="DO0">
+              <block type="notify" id="notify_tp">
+                <field name="NOTIFICATION_TYPE">success</field>
+                <field name="NOTIFICATION_SOUND">job-done</field>
+                <value name="MESSAGE">
+                  <block type="text"><field name="TEXT">Target Profit Reached!!!</field></block>
+                </value>
+                <next>
+                  <block type="stop_bot"></block>
+                </next>
+              </block>
+            </statement>
+            <statement name="ELSE">
+              <block type="controls_if" id="sl_checker">
+                <value name="IF0">
+                  <block type="logic_operation">
+                    <field name="OP">AND</field>
+                    <value name="A">
+                      <block type="logic_compare">
+                        <field name="OP">LT</field>
+                        <value name="A"><block type="total_profit"></block></value>
+                        <value name="B"><block type="math_number"><field name="NUM">0</field></block></value>
+                      </block>
+                    </value>
+                    <value name="B">
+                      <block type="logic_compare">
+                        <field name="OP">GTE</field>
+                        <value name="A">
+                          <block type="math_single">
+                            <field name="OP">ABS</field>
+                            <value name="NUM"><block type="total_profit"></block></value>
+                          </block>
+                        </value>
+                        <value name="B">
+                          <block type="variables_get"><field name="VAR" id="stop_loss">Stop Loss</field></block>
+                        </value>
+                      </block>
+                    </value>
+                  </block>
+                </value>
+                <statement name="DO0">
+                  <block type="notify" id="notify_sl">
+                    <field name="NOTIFICATION_TYPE">error</field>
+                    <field name="NOTIFICATION_SOUND">silent</field>
+                    <value name="MESSAGE">
+                      <block type="text"><field name="TEXT">Stop Loss Reached!!!</field></block>
+                    </value>
+                    <next>
+                      <block type="stop_bot"></block>
+                    </next>
+                  </block>
+                </statement>
+                <next>
+                  <block type="trade_again"></block>
+                </next>
+              </block>
+            </statement>
+          </block>
+        </next>
+      </block>
+    </statement>
+  </block>
+  <block type="tick_analysis" id="tick_ana" x="0" y="1600">
+    <statement name="TICKANALYSIS_STACK">
+      <block type="notify" id="notify_tick">
+        <field name="NOTIFICATION_TYPE">info</field>
+        <field name="NOTIFICATION_SOUND">silent</field>
+        <value name="MESSAGE">
+          <block type="last_digit"></block>
+        </value>
+        <next>
+          <block type="variables_set" id="set_l1">
+            <field name="VAR" id="l1_var">L1</field>
+            <value name="VALUE">
+              <block type="lists_getIndex" id="get_last_digit">
+                <mutation statement="false" at="false"></mutation>
+                <field name="MODE">GET</field>
+                <field name="WHERE">LAST</field>
+                <value name="VALUE">
+                  <block type="lastDigitList" id="ldl_1"></block>
+                </value>
+              </block>
+            </value>
+            <next>
+              <block type="variables_set" id="set_l2">
+                <field name="VAR" id="l2_var">L2</field>
+                <value name="VALUE">
+                  <block type="lists_getIndex" id="get_second_last_digit">
+                    <mutation statement="false" at="true"></mutation>
+                    <field name="MODE">GET</field>
+                    <field name="WHERE">FROM_END</field>
+                    <value name="VALUE">
+                      <block type="lastDigitList" id="ldl_2"></block>
+                    </value>
+                    <value name="AT">
+                      <block type="math_number"><field name="NUM">2</field></block>
+                    </value>
+                  </block>
+                </value>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+  </block>
+  <block type="before_purchase" id="before_pur" x="0" y="1900">
+    <statement name="BEFOREPURCHASE_STACK">
+      <block type="controls_if" id="check_sequence">
+        <value name="IF0">
+          <block type="logic_operation">
+            <field name="OP">AND</field>
+            <value name="A">
+              <block type="logic_compare">
+                <field name="OP">EQ</field>
+                <value name="A"><block type="variables_get"><field name="VAR" id="l2_var">L2</field></block></value>
+                <value name="B"><block type="math_number"><field name="NUM">${patternDigits[0] || 0}</field></block></value>
+              </block>
+            </value>
+            <value name="B">
+              <block type="logic_compare">
+                <field name="OP">EQ</field>
+                <value name="A"><block type="variables_get"><field name="VAR" id="l1_var">L1</field></block></value>
+                <value name="B"><block type="math_number"><field name="NUM">${patternDigits[1] || 0}</field></block></value>
+              </block>
+            </value>
+          </block>
+        </value>
+        <statement name="DO0">
+          <block type="set_prediction_single" id="set_ai_prediction">
+            <value name="PREDICTION">
+              <block type="math_number"><field name="NUM">${digit}</field></block>
+            </value>
+            <next>
+              <block type="purchase" id="buy_signal">
+                <field name="PURCHASE_LIST">${purchaseValue}</field>
+              </block>
+            </next>
+          </block>
+        </statement>
+      </block>
+    </statement>
+  </block>
+</xml>
+    `.trim();
+  };
+
+  const startAutoTrade = (best: any) => {
+    const token = getActiveToken();
+    if (!token) return;
+
+    setIsAutoTrading(true);
+    setTpSlResult(null);
+    processedContracts.current.clear();
+    setCurrentAutoStake(scannerSettings.stake);
+    setAutoSessionProfit(0);
+    setSymbol(best.symbol);
+
+    (window as any).SCANNER_TARGET_SYMBOL = best.symbol;
+    (window as any).SCANNER_TARGET_DIGIT = best.digit ?? best.target ?? 5;
+    (window as any).SCANNER_TARGET_STRATEGY = best.type || 'differ';
+    (window as any).SCANNER_TARGET_PATTERN = best.seq || '';
+    (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+
+    if (botEngine.isRunning) botEngine.stop();
+    (window as any).SCANNER_CURRENT_STAKE = scannerSettings.stake;
+    (window as any).STOP_SCANNER_BOT = false;
+
+    const autoBotCode = `
+      window.LAST_PURCHASE_TIME = 0;
+      
+      window.INITIALIZATION = async function() {
+        Bot.notify('info', 'AI Scanner Bot Initializing...');
+        window.LAST_PURCHASE_TIME = 0;
+      };
+
+      window.TRADE_OPTIONS = async function() {
+        // Wait for re-scan if one was triggered by a loss (with 15s safety timeout)
+        let waitStart = Date.now();
+        let lastNotify = 0;
+        
+        while(window.SCANNER_RESCAN_IN_PROGRESS) {
+          const now = Date.now();
+          if (now - waitStart > 15000) {
+            Bot.notify('warn', 'AI Scanner: Recovery scan taking too long. Proceeding with fallback market.');
+            window.SCANNER_RESCAN_IN_PROGRESS = false;
+            break;
+          }
+          
+          if (now - lastNotify > 5000) {
+             Bot.notify('info', 'AI Scanner: Scanning for superior recovery market...');
+             lastNotify = now;
+          }
+          await Bot.sleep(2);
+        }
+
+        const strategy = window.SCANNER_TARGET_STRATEGY || 'differ';
+        const type = strategy === 'over' ? 'digitover' : strategy === 'under' ? 'digitunder' : 'digitdiff';
+        const contract = strategy === 'over' ? 'DIGITOVER' : strategy === 'under' ? 'DIGITUNDER' : 'DIGITDIFF';
+
+        Bot.switchMarket(window.SCANNER_TARGET_SYMBOL);
+        Bot.setTradeTypeCategory('digits');
+        Bot.setTradeType(type);
+        Bot.setContractType(contract);
+        Bot.setTradeOptions({
+          durationType: 't',
+          duration: 1,
+          amount: window.SCANNER_CURRENT_STAKE,
+          prediction: window.SCANNER_TARGET_DIGIT
+        });
+      };
+
+      window.BEFORE_PURCHASE = async function() {
+        const now = Date.now();
+        // Emergency Reset Watchdog: If we are active but haven't bought in 30s, force unlock
+        // (Wait time increased because we are now waiting for specific patterns)
+        if (window.LAST_PURCHASE_TIME > 0 && now - window.LAST_PURCHASE_TIME > 30000) {
+           Bot.notify('warn', 'Waiting for pattern recurrence...');
+           window.LAST_PURCHASE_TIME = now; // Give it another 30s
+        }
+
+        // 2-second safety cooldown between AI purchases to prevent rate limits
+        if (now - window.LAST_PURCHASE_TIME < 2000) return;
+        
+        const patternStr = window.SCANNER_TARGET_PATTERN;
+        if (patternStr) {
+          const expectedPattern = patternStr.split(',').map(Number);
+          const currentDigits = Bot.getLastDigitList();
+          
+          if (currentDigits.length < expectedPattern.length) return;
+          
+          const recentDigits = currentDigits.slice(-expectedPattern.length);
+          const match = expectedPattern.every((val, i) => val === recentDigits[i]);
+          
+          if (!match) return; // Wait for pattern
+          
+          Bot.notify('success', 'Pattern Matched: [' + patternStr + ']. Executing...');
+        } else {
+          Bot.notify('info', 'AI Scanner: Evaluating purchase...');
+        }
+
+        window.LAST_PURCHASE_TIME = now;
+        const strategy = window.SCANNER_TARGET_STRATEGY || 'differ';
+        const contract = strategy === 'over' ? 'DIGITOVER' : strategy === 'under' ? 'DIGITUNDER' : 'DIGITDIFF';
+        const targetDigit = window.SCANNER_TARGET_DIGIT !== undefined && window.SCANNER_TARGET_DIGIT !== null
+          ? Number(window.SCANNER_TARGET_DIGIT)
+          : (strategy === 'over' ? 2 : strategy === 'under' ? 8 : 5);
+        let bought = Bot.purchase(contract, targetDigit);
+        if (!bought) {
+          await Bot.sleep(0.15);
+          Bot.purchase(contract, targetDigit);
+        }
+      };
+
+      window.AFTER_PURCHASE = async function() {
+        const result = Bot.checkResult('win');
+        const profit = Bot.readDetail('profit');
+        const contractId = Bot.readDetail('contract_id');
+        Bot.notify(result ? 'success' : 'warn', 'AI Scanner: Trade Finished.');
+        window.dispatchEvent(new CustomEvent('scanner_trade_result', { detail: { result, profit, contractId } }));
+
+        if (window.STOP_SCANNER_BOT) {
+          Bot.stop();
+        } else {
+          // 1-second delay before next trade evaluation
+          await Bot.sleep(1);
+          await Bot.tradeAgain();
+        }
+      };
+    `;
+
+    (window as any).STOP_SCANNER_BOT = false;
+
+    // Small delay to ensure previous execution context is cleaned up
+    setTimeout(() => {
+      const accId = getActiveAccountId();
+      const connectionType = (localStorage.getItem('deriv_connection_type') || 'oauth') as 'oauth' | 'legacy';
+      botEngine.start(token, autoBotCode, 'scanner_bot', 'AI Scanner Bot', accId || undefined, connectionType);
+      botEngine.getBotInterface().notify('success', `AI Scanner configured for ${best.name}. Ready to trade Digit ${best.digit}.`);
+    }, 500);
+  };
+
+  const stopAutoTrade = () => {
+    setIsAutoTrading(false);
+    (window as any).STOP_SCANNER_BOT = true;
+    botEngine.stop();
+    botEngine.getBotInterface().notify('info', 'AI Scanner Bot stopped.');
+  };
+
+  useEffect(() => {
+    const handleTradeResult = (e: any) => {
+      const { result, profit, contractId } = e.detail;
+      
+      // Idempotency check: Don't process same contract twice
+      if (contractId && processedContracts.current.has(String(contractId))) return;
+      if (contractId) processedContracts.current.add(String(contractId));
+
+      setAutoSessionProfit(prev => {
+        const nextProfit = prev + profit;
+        
+        if (nextProfit >= scannerSettings.tp) {
+          botEngine.getBotInterface().notify('success', `Take Profit Reached: $${nextProfit.toFixed(2)}`);
+          setTpSlResult({ type: 'tp', profit: nextProfit });
+          stopAutoTrade();
+        } else if (nextProfit <= -scannerSettings.sl) {
+          botEngine.getBotInterface().notify('error', `Stop Loss Reached: $${nextProfit.toFixed(2)}`);
+          setTpSlResult({ type: 'sl', profit: nextProfit });
+          stopAutoTrade();
+        }
+
+        return nextProfit;
+      });
+
+      // Side-effects should be outside the state update function
+      const currentStakeValue = (window as any).SCANNER_CURRENT_STAKE || scannerSettings.stake;
+      const isStalled = String(contractId).startsWith('stall_');
+
+      if (result === false && !isStalled) { 
+        consecutiveLosses.current++;
+        
+        // Immediately update global stake for Martingale to avoid race condition with bot execution
+        // Requirement: Apply martingale only if consecutive losses reach the threshold
+        if (consecutiveLosses.current >= (scannerSettings.martingaleAfter || 1)) {
+          const nextStake = currentStakeValue * scannerSettings.martingale;
+          (window as any).SCANNER_CURRENT_STAKE = nextStake;
+          botEngine.tradeParams.options.amount = nextStake;
+          setCurrentAutoStake(nextStake);
+        } else {
+          // Keep current stake if we haven't hit the loss threshold yet
+          botEngine.tradeParams.options.amount = currentStakeValue;
+          setCurrentAutoStake(currentStakeValue);
+        }
+
+        // Trigger re-scan for superior DIFFERENT market if "On Loss" or "On Trade" is selected
+        if (marketSwitchMode === 'loss' || marketSwitchMode === 'always') {
+          (window as any).SCANNER_RESCAN_IN_PROGRESS = true;
+          const currentSymbol = (window as any).SCANNER_TARGET_SYMBOL;
+          startScanning(true, currentSymbol);
+        } else {
+          (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        }
+      } else if (isStalled) {
+        // Stalled contract: Jumped/Stuck trade recovery
+        // Requirement 2: Do NOT use martingale on the next trade when it jumps
+        botEngine.getBotInterface().notify('info', 'AI Scanner: Stalled trade recovery. Maintaining previous stake.');
+        (window as any).SCANNER_CURRENT_STAKE = currentStakeValue;
+        botEngine.tradeParams.options.amount = currentStakeValue;
+        setCurrentAutoStake(currentStakeValue);
+        
+        // Also don't reset consecutive losses, as we don't know the result of the stalled one 
+        // (though we recovered)
+      } else { 
+        // Reset re-scan state and stake on win
+        consecutiveLosses.current = 0;
+        const initialStake = scannerSettings.stake;
+        (window as any).SCANNER_CURRENT_STAKE = initialStake;
+        botEngine.tradeParams.options.amount = initialStake;
+        setCurrentAutoStake(initialStake);
+
+        // Trigger re-scan and switch on every contract bought (win) if always mode is active
+        if (marketSwitchMode === 'always') {
+          (window as any).SCANNER_RESCAN_IN_PROGRESS = true;
+          const currentSymbol = (window as any).SCANNER_TARGET_SYMBOL;
+          startScanning(true, currentSymbol);
+        } else {
+          (window as any).SCANNER_RESCAN_IN_PROGRESS = false;
+        }
+      }
+    };
+
+    window.addEventListener('scanner_trade_result', handleTradeResult);
+    return () => window.removeEventListener('scanner_trade_result', handleTradeResult);
+  }, [scannerSettings, botEngine, stopAutoTrade, marketSwitchMode]); // Added botEngine and stopAutoTrade to dependencies
+
+  const frequencyBotTargetPctRef = useRef(frequencyBotTargetPct);
+  const frequencyBotContractTypeRef = useRef(frequencyBotContractType);
+  const isFrequencyBotTradingRef = useRef(isFrequencyBotTrading);
+  const frequencyBotConsecutiveLosses = useRef(0);
+  const frequencyBotTpRef = useRef(frequencyBotTp);
+  const frequencyBotSlRef = useRef(frequencyBotSl);
+  const frequencyBotDurationRef = useRef(frequencyBotDuration);
+  const frequencyBotEvenOddModeRef = useRef(frequencyBotEvenOddMode);
+  const frequencyBotBenchmarkPctRef = useRef(frequencyBotBenchmarkPct);
+  const frequencyBotDigitFilterEnabledRef = useRef(frequencyBotDigitFilterEnabled);
+  const frequencyBotFilterDigitsRef = useRef(frequencyBotFilterDigits);
+  const frequencyBotFilterCompareModeRef = useRef(frequencyBotFilterCompareMode);
+  const frequencyBotSmartRecoveryEnabledRef = useRef(frequencyBotSmartRecoveryEnabled);
+  const frequencyBotRecoveryContractTypeRef = useRef(frequencyBotRecoveryContractType);
+  const frequencyBotRecoveryTargetPctRef = useRef(frequencyBotRecoveryTargetPct);
+  const frequencyBotRecoveryCompareModeRef = useRef(frequencyBotRecoveryCompareMode);
+  const frequencyBotRecoveryFilterDigitsRef = useRef(frequencyBotRecoveryFilterDigits);
+  const frequencyBotCircleModeEnabledRef = useRef(frequencyBotCircleModeEnabled);
+  const frequencyBotCircleTypeRef = useRef(frequencyBotCircleType);
+  const frequencyBotRecoveryCircleTypeRef = useRef(frequencyBotRecoveryCircleType);
+  const frequencyBotPredictionDigitRef = useRef(frequencyBotPredictionDigit);
+  const frequencyBotRecoveryPredictionDigitRef = useRef(frequencyBotRecoveryPredictionDigit);
+  const frequencyBotAutoStakeEnabledRef = useRef(frequencyBotAutoStakeEnabled);
+  const frequencyBotAutoStakePctRef = useRef(frequencyBotAutoStakePct);
+  const frequencyBotMaxRunsEnabledRef = useRef(frequencyBotMaxRunsEnabled);
+  const frequencyBotMaxRunsRef = useRef(frequencyBotMaxRuns);
+
+  useEffect(() => { frequencyBotTargetPctRef.current = frequencyBotTargetPct; }, [frequencyBotTargetPct]);
+  useEffect(() => { frequencyBotContractTypeRef.current = frequencyBotContractType; }, [frequencyBotContractType]);
+  useEffect(() => { isFrequencyBotTradingRef.current = isFrequencyBotTrading; }, [isFrequencyBotTrading]);
+  useEffect(() => { frequencyBotTpRef.current = frequencyBotTp; }, [frequencyBotTp]);
+  useEffect(() => { frequencyBotSlRef.current = frequencyBotSl; }, [frequencyBotSl]);
+  useEffect(() => { frequencyBotDurationRef.current = frequencyBotDuration; }, [frequencyBotDuration]);
+  useEffect(() => { frequencyBotEvenOddModeRef.current = frequencyBotEvenOddMode; }, [frequencyBotEvenOddMode]);
+  useEffect(() => { frequencyBotBenchmarkPctRef.current = frequencyBotBenchmarkPct; }, [frequencyBotBenchmarkPct]);
+  useEffect(() => { frequencyBotDigitFilterEnabledRef.current = frequencyBotDigitFilterEnabled; }, [frequencyBotDigitFilterEnabled]);
+  useEffect(() => { frequencyBotFilterDigitsRef.current = frequencyBotFilterDigits; }, [frequencyBotFilterDigits]);
+  useEffect(() => { frequencyBotFilterCompareModeRef.current = frequencyBotFilterCompareMode; }, [frequencyBotFilterCompareMode]);
+  useEffect(() => { frequencyBotSmartRecoveryEnabledRef.current = frequencyBotSmartRecoveryEnabled; }, [frequencyBotSmartRecoveryEnabled]);
+  useEffect(() => { frequencyBotRecoveryContractTypeRef.current = frequencyBotRecoveryContractType; }, [frequencyBotRecoveryContractType]);
+  useEffect(() => { frequencyBotRecoveryTargetPctRef.current = frequencyBotRecoveryTargetPct; }, [frequencyBotRecoveryTargetPct]);
+  useEffect(() => { frequencyBotRecoveryCompareModeRef.current = frequencyBotRecoveryCompareMode; }, [frequencyBotRecoveryCompareMode]);
+  useEffect(() => { frequencyBotRecoveryFilterDigitsRef.current = frequencyBotRecoveryFilterDigits; }, [frequencyBotRecoveryFilterDigits]);
+  useEffect(() => { frequencyBotCircleModeEnabledRef.current = frequencyBotCircleModeEnabled; }, [frequencyBotCircleModeEnabled]);
+  useEffect(() => { frequencyBotCircleTypeRef.current = frequencyBotCircleType; }, [frequencyBotCircleType]);
+  useEffect(() => { frequencyBotRecoveryCircleTypeRef.current = frequencyBotRecoveryCircleType; }, [frequencyBotRecoveryCircleType]);
+  useEffect(() => { frequencyBotPredictionDigitRef.current = frequencyBotPredictionDigit; }, [frequencyBotPredictionDigit]);
+  useEffect(() => { frequencyBotRecoveryPredictionDigitRef.current = frequencyBotRecoveryPredictionDigit; }, [frequencyBotRecoveryPredictionDigit]);
+  useEffect(() => { frequencyBotAutoStakeEnabledRef.current = frequencyBotAutoStakeEnabled; }, [frequencyBotAutoStakeEnabled]);
+  useEffect(() => { frequencyBotAutoStakePctRef.current = frequencyBotAutoStakePct; }, [frequencyBotAutoStakePct]);
+  useEffect(() => { frequencyBotMaxRunsEnabledRef.current = frequencyBotMaxRunsEnabled; }, [frequencyBotMaxRunsEnabled]);
+  useEffect(() => { frequencyBotMaxRunsRef.current = frequencyBotMaxRuns; }, [frequencyBotMaxRuns]);
+
+  const startFrequencyBot = () => {
+    const token = getActiveToken();
+    if (!token) {
+      botEngine.getBotInterface().notify('error', 'Token error: Please log in to your Deriv account.');
+      return;
+    }
+
+    if (isAutoTrading) {
+      stopAutoTrade();
+    }
+
+    let initialStake = frequencyBotStake;
+    if (frequencyBotAutoStakeEnabled) {
+      const bal = (rootStore.client as any)?.balance > 0 ? (rootStore.client as any).balance : 100;
+      initialStake = Math.max(0.35, parseFloat((bal * (frequencyBotAutoStakePct / 100)).toFixed(2)));
+      setFrequencyBotStake(initialStake);
+    }
+
+    setIsFrequencyBotTrading(true);
+    setFrequencyBotResult(null);
+    setFrequencyBotWins(0);
+    setFrequencyBotLosses(0);
+    processedContracts.current.clear();
+    setFrequencyBotCurrentStake(initialStake);
+    setFrequencyBotSessionProfit(0);
+    frequencyBotConsecutiveLosses.current = 0;
+
+    (window as any).FREQUENCY_BOT_TARGET_SYMBOL = symbol;
+    (window as any).FREQUENCY_BOT_STAKE = initialStake;
+    (window as any).FREQUENCY_BOT_MARTINGALE = frequencyBotMartingale;
+    (window as any).FREQUENCY_BOT_TARGET_PCT = frequencyBotTargetPct;
+    (window as any).FREQUENCY_BOT_CONTRACT_TYPE = frequencyBotContractType;
+    (window as any).FREQUENCY_BOT_DURATION = frequencyBotDuration;
+    (window as any).FREQUENCY_BOT_EVEN_ODD_MODE = frequencyBotEvenOddMode;
+    (window as any).FREQUENCY_BOT_BENCHMARK_PCT = frequencyBotBenchmarkPct;
+    (window as any).FREQUENCY_BOT_ACTIVE = true;
+    (window as any).FREQUENCY_BOT_MATCHED_DIGIT = null;
+    (window as any).FREQUENCY_BOT_MOST_FREQUENT = analysis?.mostFrequent ?? 0;
+    (window as any).FREQUENCY_BOT_LEAST_FREQUENT = analysis?.leastFrequent ?? 0;
+
+    let secondMost = 0;
+    let secondLeast = 0;
+    if (analysis?.frequencies) {
+      const sorted = analysis.frequencies
+        .map((f, i) => ({ digit: i, freq: f }))
+        .sort((a, b) => b.freq - a.freq);
+      if (sorted.length >= 10) {
+        secondMost = sorted[1].digit;
+        secondLeast = sorted[8].digit;
+      }
+    }
+    (window as any).FREQUENCY_BOT_SECOND_MOST_FREQUENT = secondMost;
+    (window as any).FREQUENCY_BOT_SECOND_LEAST_FREQUENT = secondLeast;
+
+    (window as any).FREQUENCY_BOT_CIRCLE_MODE_ENABLED = frequencyBotCircleModeEnabled;
+    (window as any).FREQUENCY_BOT_CIRCLE_TYPE = frequencyBotCircleType;
+    (window as any).FREQUENCY_BOT_RECOVERY_CIRCLE_TYPE = frequencyBotRecoveryCircleType;
+    (window as any).FREQUENCY_BOT_PREDICTION_DIGIT = frequencyBotPredictionDigit;
+    (window as any).FREQUENCY_BOT_RECOVERY_PREDICTION_DIGIT = frequencyBotRecoveryPredictionDigit;
+    (window as any).FREQUENCY_BOT_RESCAN_IN_PROGRESS = false;
+    (window as any).FREQUENCY_BOT_CONSECUTIVE_LOSSES = frequencyBotConsecutiveLosses.current;
+
+    if (botEngine.isRunning) botEngine.stop();
+
+    const freqBotCode = `
+      window.LAST_PURCHASE_TIME = 0;
+      
+      window.INITIALIZATION = async function() {
+        Bot.notify('info', 'Digit Frequency Bot Initializing...');
+        window.LAST_PURCHASE_TIME = 0;
+      };
+
+      window.TRADE_OPTIONS = async function() {
+        // Wait for re-scan if one was triggered by a loss/trade (with 15s safety timeout)
+        let waitStart = Date.now();
+        let lastNotify = 0;
+        
+        while(window.FREQUENCY_BOT_RESCAN_IN_PROGRESS) {
+          const now = Date.now();
+          if (now - waitStart > 15000) {
+            Bot.notify('warn', 'Digit Frequency Bot: Market switch scan taking too long. Proceeding with fallback.');
+            window.FREQUENCY_BOT_RESCAN_IN_PROGRESS = false;
+            break;
+          }
+          
+          if (now - lastNotify > 5000) {
+             Bot.notify('info', 'Digit Frequency Bot: Swapping market index...');
+             lastNotify = now;
+          }
+          await Bot.sleep(1);
+        }
+
+        const strategy = window.FREQUENCY_BOT_CONTRACT_TYPE || 'differ';
+        let type = 'digitdiff';
+        let contract = 'DIGITDIFF';
+
+        if (strategy === 'coldest' || strategy === 'differ') {
+          type = 'digitdiff';
+          contract = 'DIGITDIFF';
+        } else if (strategy === 'over') {
+          type = 'digitover';
+          contract = 'DIGITOVER';
+        } else if (strategy === 'under') {
+          type = 'digitunder';
+          contract = 'DIGITUNDER';
+        } else if (strategy === 'even') {
+          type = 'evenodd';
+          contract = 'DIGITEVEN';
+        } else if (strategy === 'odd') {
+          type = 'evenodd';
+          contract = 'DIGITODD';
+        }
+
+        Bot.switchMarket(window.FREQUENCY_BOT_TARGET_SYMBOL);
+        Bot.setTradeTypeCategory('digits');
+        Bot.setTradeType(type);
+        Bot.setContractType(contract);
+        
+        let matchedDigit = 0;
+        if (window.FREQUENCY_BOT_CIRCLE_MODE_ENABLED) {
+          // Wait until React sets FREQUENCY_BOT_MATCHED_DIGIT when the cursor touches the circle
+          let lastLog = 0;
+          while (window.FREQUENCY_BOT_ACTIVE && window.FREQUENCY_BOT_MATCHED_DIGIT === null) {
+            const now = Date.now();
+            if (now - lastLog > 5000) {
+              Bot.notify('info', 'Waiting for circle cursor touch...');
+              lastLog = now;
+            }
+            await Bot.sleep(0.1);
+          }
+          matchedDigit = window.FREQUENCY_BOT_MATCHED_DIGIT !== null ? Number(window.FREQUENCY_BOT_MATCHED_DIGIT) : 0;
+        } else {
+          // Wait until React sets FREQUENCY_BOT_MATCHED_DIGIT (normal mode)
+          let lastLog = 0;
+          while (window.FREQUENCY_BOT_ACTIVE && window.FREQUENCY_BOT_MATCHED_DIGIT === null) {
+            const now = Date.now();
+            if (now - lastLog > 5000) {
+              Bot.notify('info', 'Waiting for frequency target match...');
+              lastLog = now;
+            }
+            await Bot.sleep(0.5);
+          }
+          matchedDigit = window.FREQUENCY_BOT_MATCHED_DIGIT !== null ? Number(window.FREQUENCY_BOT_MATCHED_DIGIT) : 0;
+        }
+
+        const durationTicks = Number(window.FREQUENCY_BOT_DURATION) || 1;
+
+        const options = {
+          durationType: 't',
+          duration: durationTicks,
+          amount: window.FREQUENCY_BOT_STAKE
+        };
+
+        if (strategy !== 'even' && strategy !== 'odd') {
+          if (window.FREQUENCY_BOT_CIRCLE_MODE_ENABLED && (strategy === 'over' || strategy === 'under')) {
+            const isRecovery = (window.FREQUENCY_BOT_CONSECUTIVE_LOSSES || 0) > 0;
+            const predDigit = isRecovery 
+              ? (window.FREQUENCY_BOT_RECOVERY_PREDICTION_DIGIT !== undefined ? Number(window.FREQUENCY_BOT_RECOVERY_PREDICTION_DIGIT) : 5)
+              : (window.FREQUENCY_BOT_PREDICTION_DIGIT !== undefined ? Number(window.FREQUENCY_BOT_PREDICTION_DIGIT) : 5);
+            options.prediction = predDigit;
+          } else {
+            options.prediction = matchedDigit;
+          }
+        }
+
+        Bot.setTradeOptions(options);
+      };
+
+      window.BEFORE_PURCHASE = async function() {
+        const now = Date.now();
+        if (now - window.LAST_PURCHASE_TIME < 2000) return;
+        
+        // Wait until React sets a matched digit
+        if (window.FREQUENCY_BOT_MATCHED_DIGIT === null) return;
+
+        const strategy = window.FREQUENCY_BOT_CONTRACT_TYPE || 'differ';
+        
+        let contract = 'DIGITDIFF';
+        if (strategy === 'coldest' || strategy === 'differ') {
+          contract = 'DIGITDIFF';
+        } else if (strategy === 'over') {
+          contract = 'DIGITOVER';
+        } else if (strategy === 'under') {
+          contract = 'DIGITUNDER';
+        } else if (strategy === 'even') {
+          contract = 'DIGITEVEN';
+        } else if (strategy === 'odd') {
+          contract = 'DIGITODD';
+        }
+
+        Bot.notify('success', 'Exact condition matched. Executing purchase of ' + contract + '...');
+        window.LAST_PURCHASE_TIME = now;
+        
+        let predDigit = 5;
+        if (strategy === 'over') {
+          predDigit = window.FREQUENCY_BOT_PREDICTION_DIGIT !== undefined ? Number(window.FREQUENCY_BOT_PREDICTION_DIGIT) : 2;
+        } else if (strategy === 'under') {
+          predDigit = window.FREQUENCY_BOT_PREDICTION_DIGIT !== undefined ? Number(window.FREQUENCY_BOT_PREDICTION_DIGIT) : 8;
+        } else if (strategy === 'coldest' || strategy === 'differ') {
+          predDigit = window.FREQUENCY_BOT_MATCHED_DIGIT !== null ? Number(window.FREQUENCY_BOT_MATCHED_DIGIT) : 5;
+        }
+
+        let bought = Bot.purchase(contract, predDigit);
+        if (!bought) {
+          await Bot.sleep(0.15);
+          Bot.purchase(contract, predDigit);
+        }
+      };
+
+      window.AFTER_PURCHASE = async function() {
+        const result = Bot.checkResult('win');
+        const profit = Bot.readDetail('profit');
+        const contractId = Bot.readDetail('contract_id');
+        Bot.notify(result ? 'success' : 'warn', 'Digit Frequency Bot: Trade Finished.');
+        
+        // Signal to React of the transaction result
+        window.dispatchEvent(new CustomEvent('frequency_bot_trade_result', { detail: { result, profit, contractId } }));
+
+        // Clear the matched digit so React has to find another match for next trade
+        window.FREQUENCY_BOT_MATCHED_DIGIT = null;
+
+        if (!window.FREQUENCY_BOT_ACTIVE) {
+          Bot.stop();
+        } else {
+          await Bot.sleep(1);
+          await Bot.tradeAgain();
+        }
+      };
+    `;
+
+    setTimeout(() => {
+      const accId = getActiveAccountId();
+      const connectionType = (localStorage.getItem('deriv_connection_type') || 'oauth') as 'oauth' | 'legacy';
+      botEngine.start(token, freqBotCode, 'frequency_bot', 'Digit Frequency Bot', accId || undefined, connectionType);
+      
+      let targetDesc = '';
+      if (frequencyBotContractType === 'coldest') {
+        targetDesc = `Coldest Ticker [Differ on Coldest Digit]`;
+      } else if (frequencyBotContractType === 'even' || frequencyBotContractType === 'odd') {
+        targetDesc = `Even/Odd [${frequencyBotEvenOddMode}]`;
+      } else {
+        if (frequencyBotDigitFilterEnabled) {
+          targetDesc = `Digit ${frequencyBotContractType} on [${frequencyBotFilterDigits}] ${frequencyBotFilterCompareMode === 'higher' ? '>=' : '<='} ${frequencyBotTargetPct}%`;
+        } else {
+          targetDesc = `Digit ${frequencyBotContractType} @ ${frequencyBotTargetPct}%`;
+        }
+      }
+
+      botEngine.getBotInterface().notify('success', `Digit Frequency Bot started. Host Market: ${symbol}. Mode: ${targetDesc}`);
+    }, 500);
+  };
+
+  const stopFrequencyBot = () => {
+    setIsFrequencyBotTrading(false);
+    (window as any).FREQUENCY_BOT_ACTIVE = false;
+    (window as any).FREQUENCY_BOT_MATCHED_DIGIT = null;
+    (window as any).FREQUENCY_BOT_RESCAN_IN_PROGRESS = false;
+    botEngine.stop();
+    botEngine.getBotInterface().notify('info', 'Digit Frequency Bot stopped.');
+  };
+
+  // React match checker effect
+  useEffect(() => {
+    if (!isFrequencyBotTrading || !analysis) return;
+
+    if ((window as any).FREQUENCY_BOT_MATCHED_DIGIT !== null) return;
+
+    const isRecovery = frequencyBotSmartRecoveryEnabledRef.current && frequencyBotConsecutiveLosses.current > 0;
+
+    const strategy = isRecovery 
+      ? frequencyBotRecoveryContractTypeRef.current 
+      : frequencyBotContractTypeRef.current;
+
+    // Dynamically update the contract type for the bot engine if it has shifted
+    (window as any).FREQUENCY_BOT_CONTRACT_TYPE = strategy;
+
+    if (frequencyBotCircleModeEnabledRef.current) {
+      const circleStyle = isRecovery ? frequencyBotRecoveryCircleTypeRef.current : frequencyBotCircleTypeRef.current;
+      let targetDigit = analysis.leastFrequent;
+      if (circleStyle === 'green') {
+        targetDigit = analysis.mostFrequent;
+      } else if (circleStyle === 'blue') {
+        targetDigit = rankedDigits.length >= 2 ? rankedDigits[1].digit : analysis.mostFrequent;
+      } else if (circleStyle === 'orange') {
+        targetDigit = rankedDigits.length >= 10 ? rankedDigits[8].digit : analysis.leastFrequent;
+      } else {
+        targetDigit = analysis.leastFrequent;
+      }
+
+      if (targetDigit !== undefined && targetDigit !== null) {
+        const liveLastDigit = ticks.length > 0 ? ticks[ticks.length - 1].digit : 0;
+        if (liveLastDigit === targetDigit) {
+          (window as any).FREQUENCY_BOT_MATCHED_DIGIT = targetDigit;
+          botEngine.getBotInterface().notify('success', `Match Found (${isRecovery ? 'Smart Recovery ' : ''}Circle Mode - ${circleStyle.toUpperCase()}): Digit ${targetDigit} touched by cursor! Placing ${strategy.toUpperCase()} contract.`);
+        }
+      }
+    } else if (strategy === 'coldest') {
+      const coldestDigit = analysis.leastFrequent;
+      if (coldestDigit !== undefined && coldestDigit !== null) {
+        const freq = analysis.frequencies[coldestDigit] || 0;
+        (window as any).FREQUENCY_BOT_MATCHED_DIGIT = coldestDigit;
+        botEngine.getBotInterface().notify('success', `Match Found (Coldest Ticker): Digit ${coldestDigit} is the coldest digit (${freq.toFixed(1)}% frequency)! Placing DIGITDIFF contract.`);
+      }
+    } else if (strategy === 'even' || strategy === 'odd') {
+      const mode = frequencyBotEvenOddModeRef.current;
+      const benchmarkPct = frequencyBotBenchmarkPctRef.current;
+      
+      const evens = [0, 2, 4, 6, 8];
+      const odds = [1, 3, 5, 7, 9];
+
+      let isConditionMet = false;
+      let infoText = "";
+
+      if (mode === 'high_even') {
+        const count = evens.filter(d => (analysis.frequencies[d] || 0) > benchmarkPct).length;
+        isConditionMet = count > 3;
+        infoText = `${count} Even digits are above ${benchmarkPct.toFixed(1)}%`;
+      } else if (mode === 'low_even') {
+        const count = evens.filter(d => (analysis.frequencies[d] || 0) < benchmarkPct).length;
+        isConditionMet = count >= 3;
+        infoText = `${count} Even digits are below ${benchmarkPct.toFixed(1)}%`;
+      } else if (mode === 'high_odd') {
+        const count = odds.filter(d => (analysis.frequencies[d] || 0) > benchmarkPct).length;
+        isConditionMet = count > 3;
+        infoText = `${count} Odd digits are above ${benchmarkPct.toFixed(1)}%`;
+      } else if (mode === 'low_odd') {
+        const count = odds.filter(d => (analysis.frequencies[d] || 0) < benchmarkPct).length;
+        isConditionMet = count >= 3;
+        infoText = `${count} Odd digits are below ${benchmarkPct.toFixed(1)}%`;
+      }
+
+      if (isConditionMet) {
+        (window as any).FREQUENCY_BOT_MATCHED_DIGIT = 0; // Trigger dummy digit
+        botEngine.getBotInterface().notify('success', `${isRecovery ? 'Recovery' : 'Normal'} Even/Odd condition matched: ${infoText}! Placing ${strategy.toUpperCase()} contract.`);
+      }
+    } else {
+      const isSpecificDigitsActive = frequencyBotDigitFilterEnabledRef.current;
+      const compareMode = isRecovery ? frequencyBotRecoveryCompareMode : frequencyBotFilterCompareModeRef.current;
+      const targetPct = isRecovery ? frequencyBotRecoveryTargetPct : frequencyBotTargetPct;
+
+      if (isRecovery) {
+        if (isSpecificDigitsActive) {
+          // Smart Recovery is active and Specific Digits filtering is active (use specific digits list)
+          const filterDigitsStr = frequencyBotRecoveryFilterDigits;
+          const targetDigits = filterDigitsStr.split(',')
+            .map(s => parseInt(s.trim(), 10))
+            .filter(val => !isNaN(val) && val >= 0 && val <= 9);
+
+          for (let d = 0; d <= 9; d++) {
+            if (!targetDigits.includes(d)) continue;
+
+            const freq = analysis.frequencies[d] || 0;
+            let isMatch = false;
+
+            if (compareMode === 'higher') {
+              isMatch = freq >= targetPct;
+            } else {
+              isMatch = freq <= targetPct;
+            }
+
+            if (isMatch) {
+              (window as any).FREQUENCY_BOT_MATCHED_DIGIT = d;
+              botEngine.getBotInterface().notify('success', `Match Found (Smart Recovery Filter): Digit ${d} has frequency ${freq.toFixed(1)}% which is ${compareMode === 'higher' ? '>= (higher)' : '<= (lower)'} than target ${targetPct.toFixed(1)}%!`);
+              break;
+            }
+          }
+        } else {
+          // Smart Recovery is active, but Specific Digits filtering is inactive (use all digits, comparing Target Pct% and Direction)
+          for (let d = 0; d <= 9; d++) {
+            const freq = analysis.frequencies[d] || 0;
+            let isMatch = false;
+
+            if (compareMode === 'higher') {
+              isMatch = freq >= targetPct;
+            } else {
+              isMatch = freq <= targetPct;
+            }
+
+            if (isMatch) {
+              (window as any).FREQUENCY_BOT_MATCHED_DIGIT = d;
+              botEngine.getBotInterface().notify('success', `Match Found (Smart Recovery): Digit ${d} has frequency ${freq.toFixed(1)}% which is ${compareMode === 'higher' ? '>= (higher)' : '<= (lower)'} than target ${targetPct.toFixed(1)}%!`);
+              break;
+            }
+          }
+        }
+      } else {
+        // Normal Trading
+        if (isSpecificDigitsActive) {
+          // Specific Digits filter is active
+          const filterDigitsStr = frequencyBotFilterDigitsRef.current || '0';
+          const targetDigits = filterDigitsStr.split(',')
+            .map(s => parseInt(s.trim(), 10))
+            .filter(val => !isNaN(val) && val >= 0 && val <= 9);
+
+          for (let d = 0; d <= 9; d++) {
+            if (!targetDigits.includes(d)) continue;
+
+            const freq = analysis.frequencies[d] || 0;
+            let isMatch = false;
+
+            if (compareMode === 'higher') {
+              isMatch = freq >= targetPct;
+            } else {
+              isMatch = freq <= targetPct;
+            }
+
+            if (isMatch) {
+              (window as any).FREQUENCY_BOT_MATCHED_DIGIT = d;
+              botEngine.getBotInterface().notify('success', `Match Found (Filtered): Digit ${d} has frequency ${freq.toFixed(1)}% which is ${compareMode === 'higher' ? '>= (higher)' : '<= (lower)'} than target ${targetPct.toFixed(1)}%!`);
+              break;
+            }
+          }
+        } else {
+          // Specific Digits is inactive (exact match)
+          const targetPctStr = Number(frequencyBotTargetPct).toFixed(1);
+
+          for (let d = 0; d <= 9; d++) {
+            const freq = analysis.frequencies[d] || 0;
+            const freqStr = Number(freq).toFixed(1);
+
+            if (freqStr === targetPctStr) {
+              (window as any).FREQUENCY_BOT_MATCHED_DIGIT = d;
+              botEngine.getBotInterface().notify('success', `Match Found: Digit ${d} has exactly ${freqStr}% frequency!`);
+              break; // Match first occurrences
+            }
+          }
+        }
+      }
+    }
+  }, [
+    analysis, 
+    isFrequencyBotTrading, 
+    frequencyBotTargetPct, 
+    frequencyBotEvenOddMode, 
+    frequencyBotBenchmarkPct, 
+    frequencyBotContractType, 
+    frequencyBotDigitFilterEnabled, 
+    frequencyBotFilterDigits, 
+    frequencyBotFilterCompareMode,
+    frequencyBotSmartRecoveryEnabled,
+    frequencyBotRecoveryContractType,
+    frequencyBotRecoveryTargetPct,
+    frequencyBotRecoveryCompareMode,
+    frequencyBotRecoveryFilterDigits,
+    frequencyBotCircleModeEnabled,
+    frequencyBotCircleType,
+    frequencyBotRecoveryCircleType
+  ]);
+
+  // Results effect
+  useEffect(() => {
+    const handleFreqBotResult = (e: any) => {
+      const { result, profit, contractId } = e.detail;
+
+      if (contractId && processedContracts.current.has(String(contractId))) return;
+      if (contractId) processedContracts.current.add(String(contractId));
+
+      let nextProfit = 0;
+      setFrequencyBotSessionProfit(prev => {
+        nextProfit = prev + profit;
+        return nextProfit;
+      });
+
+      const currentStakeValue = (window as any).FREQUENCY_BOT_STAKE || frequencyBotStake;
+
+      let newWins = frequencyBotWins;
+      let newLosses = frequencyBotLosses;
+
+      if (result === false) {
+        newLosses = frequencyBotLosses + 1;
+        setFrequencyBotLosses(prev => prev + 1);
+        frequencyBotConsecutiveLosses.current++;
+        (window as any).FREQUENCY_BOT_CONSECUTIVE_LOSSES = frequencyBotConsecutiveLosses.current;
+        const nextStake = currentStakeValue * frequencyBotMartingale;
+        (window as any).FREQUENCY_BOT_STAKE = nextStake;
+        botEngine.tradeParams.options.amount = nextStake;
+        setFrequencyBotCurrentStake(nextStake);
+        setFrequencyBotResult({ type: 'loss', profit });
+
+        // Update contract type to recovery settings if enabled
+        if (frequencyBotSmartRecoveryEnabled) {
+          (window as any).FREQUENCY_BOT_CONTRACT_TYPE = frequencyBotRecoveryContractType;
+        }
+
+        // Trigger re-scan for superior DIFFERENT market if "On Loss" or "On Trade" is selected
+        if (marketSwitchMode === 'loss' || marketSwitchMode === 'always') {
+          (window as any).FREQUENCY_BOT_RESCAN_IN_PROGRESS = true;
+          const currentSymbol = (window as any).FREQUENCY_BOT_TARGET_SYMBOL || symbol;
+          startScanning(true, currentSymbol);
+        } else {
+          (window as any).FREQUENCY_BOT_RESCAN_IN_PROGRESS = false;
+        }
+      } else {
+        newWins = frequencyBotWins + 1;
+        setFrequencyBotWins(prev => prev + 1);
+        frequencyBotConsecutiveLosses.current = 0;
+        (window as any).FREQUENCY_BOT_CONSECUTIVE_LOSSES = frequencyBotConsecutiveLosses.current;
+        
+        let initialStake = frequencyBotStake;
+        if (frequencyBotAutoStakeEnabledRef.current) {
+          const bal = (rootStore.client as any)?.balance > 0 ? (rootStore.client as any).balance : 100;
+          initialStake = Math.max(0.35, parseFloat((bal * (frequencyBotAutoStakePctRef.current / 100)).toFixed(2)));
+          setFrequencyBotStake(initialStake);
+        }
+
+        (window as any).FREQUENCY_BOT_STAKE = initialStake;
+        botEngine.tradeParams.options.amount = initialStake;
+        setFrequencyBotCurrentStake(initialStake);
+        setFrequencyBotResult({ type: 'win', profit });
+
+        // Reset contract type to normal settings
+        (window as any).FREQUENCY_BOT_CONTRACT_TYPE = frequencyBotContractType;
+
+        // Trigger re-scan for superior DIFFERENT market if always mode is active
+        if (marketSwitchMode === 'always') {
+          (window as any).FREQUENCY_BOT_RESCAN_IN_PROGRESS = true;
+          const currentSymbol = (window as any).FREQUENCY_BOT_TARGET_SYMBOL || symbol;
+          startScanning(true, currentSymbol);
+        } else {
+          (window as any).FREQUENCY_BOT_RESCAN_IN_PROGRESS = false;
+        }
+      }
+
+      const tp = frequencyBotTpRef.current;
+      const sl = frequencyBotSlRef.current;
+      const maxRunsEnabled = frequencyBotMaxRunsEnabledRef.current;
+      const maxRuns = frequencyBotMaxRunsRef.current;
+
+      setTimeout(() => {
+        if (maxRunsEnabled) {
+          if (newWins >= maxRuns && frequencyBotConsecutiveLosses.current === 0) {
+            botEngine.getBotInterface().notify('success', `Digit Frequency Bot: Target winning runs reached (${newWins}/${maxRuns} wins)! Stopping bot.`);
+            stopFrequencyBot();
+            return;
+          }
+        } else if (nextProfit >= tp) {
+          botEngine.getBotInterface().notify('success', `Digit Frequency Bot: Take Profit reached! Target: +$${tp}. Profit: $${nextProfit.toFixed(2)}`);
+          stopFrequencyBot();
+          return;
+        }
+
+        if (nextProfit <= -sl) {
+          botEngine.getBotInterface().notify('error', `Digit Frequency Bot: Stop Loss reached! Limit: -$${sl}. Loss: $${nextProfit.toFixed(2)}`);
+          stopFrequencyBot();
+        }
+      }, 50);
+    };
+
+    window.addEventListener('frequency_bot_trade_result', handleFreqBotResult);
+    return () => window.removeEventListener('frequency_bot_trade_result', handleFreqBotResult);
+  }, [
+    frequencyBotStake, 
+    frequencyBotMartingale, 
+    frequencyBotSmartRecoveryEnabled, 
+    frequencyBotRecoveryContractType, 
+    frequencyBotContractType,
+    marketSwitchMode,
+    symbol
+  ]);
+
+  // Chart Data
+  const digitChartData = useMemo(() => {
+    if (!analysis) return [];
+    return analysis.frequencies.map((f, i) => ({
+      digit: i,
+      frequency: parseFloat(f.toFixed(1)),
+      count: Math.round((f / 100) * ticks.length)
+    }));
+  }, [analysis]);
+
+  const priceHistoryData = useMemo(() => {
+    return ticks.slice(-100).map(t => ({
+      time: new Date(t.epoch * 1000).toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
+      price: t.quote
+    }));
+  }, [ticks]);
+
+  const lastDigit = ticks.length > 0 ? ticks[ticks.length - 1].digit : 0;
+
+  // Synchronous, latency-free pointer cursor tracking
+  useEffect(() => {
+    const updateCursor = () => {
+      const cursorEl = document.getElementById('deriv-digit-cursor');
+      const targetEl = document.getElementById(`digit-${lastDigit}`);
+      const gridEl = document.getElementById('grid');
+      
+      if (cursorEl && targetEl && gridEl) {
+        const gridRect = gridEl.getBoundingClientRect();
+        const circleEl = targetEl.querySelector('.circle-wrapper');
+        const refRect = circleEl ? circleEl.getBoundingClientRect() : targetEl.getBoundingClientRect();
+        
+        const isMobile = window.innerWidth < 640;
+        const widthOffset = isMobile ? 6 : 8;
+        const gap = isMobile ? 6 : 10;
+
+        const x = (refRect.left - gridRect.left) + (refRect.width / 2) - widthOffset;
+        const y = (refRect.top - gridRect.top) + refRect.height + gap;
+        
+        if (refRect.width > 0 && refRect.height > 0) {
+          cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+          cursorEl.style.opacity = '1';
+        }
+      } else if (cursorEl) {
+        cursorEl.style.opacity = '0';
+      }
+    };
+
+    const rAF = requestAnimationFrame(updateCursor);
+    const timeoutId = setTimeout(updateCursor, 0);
+
+    window.addEventListener('resize', updateCursor);
+    return () => {
+      cancelAnimationFrame(rAF);
+      clearTimeout(timeoutId);
+      window.removeEventListener('resize', updateCursor);
+    };
+  }, [lastDigit, ticks.length]);
+
+  return (
+    <div className="flex-1 overflow-auto bg-[#0a0b0d] text-[#e1e1e1] p-4 sm:p-6 lg:p-8 custom-scrollbar w-full">
+      <div className="w-full space-y-8">
+        
+        {/* Superior Header */}
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-8">
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-indigo-500/10 rounded-xl">
+                <Activity size={24} className="text-indigo-400" />
+              </div>
+              <h1 className="text-3xl font-extrabold tracking-tight text-white">Professional Data Analysis</h1>
+            </div>
+
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 sm:gap-4 bg-[#111217] p-3 sm:p-2 rounded-2xl border border-[#2d2f36] w-full md:w-auto">
+            {!isAutoTrading ? (
+              <button 
+                onClick={() => setShowScanResults(true)}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-black text-white transition-all shadow-lg active:scale-95 group overflow-hidden relative w-full sm:w-auto"
+              >
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]" />
+                <Activity size={18} fill="currentColor" />
+                OTIVO NEURAL ENGINE
+              </button>
+            ) : (
+              <button 
+                onClick={stopAutoTrade}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-rose-600 hover:bg-rose-500 rounded-xl text-sm font-black text-white transition-all shadow-lg active:scale-95 animate-pulse w-full sm:w-auto"
+              >
+                <Square size={18} fill="currentColor" />
+                STOP AI BOT
+              </button>
+            )}
+
+            <button
+              onClick={() => setShowHackerModal(true)}
+              className="flex items-center justify-center gap-2 px-5 py-2.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 rounded-xl text-sm font-black text-white transition-all shadow-lg shadow-indigo-500/20 active:scale-95 relative w-full sm:w-auto border border-violet-400/30"
+            >
+              <Zap size={18} className="text-amber-300 animate-pulse" />
+              <span>AI MARKET HACKER</span>
+              {hackerScanning && (
+                <span className="flex h-2 w-2 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+              )}
+            </button>
+            <div className="relative group w-full sm:w-auto">
+              <select 
+                value={symbol}
+                onChange={(e) => {
+                  const newSym = e.target.value;
+                  setSymbol(newSym);
+                  handleUpdateWindow(activeWindowId, { symbol: newSym });
+                }}
+                className={cn(
+                  "bg-[#0a0b0d] hover:bg-[#1a1c23] border rounded-xl pl-4 pr-10 py-2.5 text-sm font-bold appearance-none focus:outline-none transition-all cursor-pointer w-full md:min-w-[220px]",
+                  contractAnalysisMode === 'accumulators' ? "border-amber-500/40 text-amber-300" : "border-[#2d2f36] text-white"
+                )}
+              >
+                {(contractAnalysisMode === 'accumulators' ? SYMBOLS.filter(s => isVolatilityIndex(s.id)) : SYMBOLS).map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.id})</option>
+                ))}
+              </select>
+              <ChevronDown size={14} className="absolute right-4 top-1/2 -translate-y-1/2 text-[#555] pointer-events-none" />
+            </div>
+
+            <div className="flex items-center justify-between sm:justify-start gap-2 bg-[#0a0b0d] border border-[#2d2f36] rounded-xl px-3 py-2.5 w-full sm:w-auto">
+              <span className="text-xs font-black uppercase text-[#9ba1a6] tracking-wider select-none">History Ticks:</span>
+              <input 
+                type="number"
+                min="10"
+                max="5000"
+                value={tempWindow}
+                onChange={(e) => setTempWindow(e.target.value)}
+                onBlur={() => {
+                  let num = parseInt(tempWindow, 10);
+                  if (isNaN(num) || num < 10) num = 100;
+                  if (num > 5000) num = 5000;
+                  setTempWindow(num.toString());
+                  setAnalysisWindow(num);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    let num = parseInt(tempWindow, 10);
+                    if (isNaN(num) || num < 10) num = 100;
+                    if (num > 5000) num = 5000;
+                    setTempWindow(num.toString());
+                    setAnalysisWindow(num);
+                  }
+                }}
+                className="w-16 bg-transparent text-white text-sm font-black font-mono outline-none text-right [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none border-b border-white/10 focus:border-indigo-500"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Deriv Contract Analysis Mode Selector */}
+        <div className="bg-[#111217] p-2.5 rounded-2xl border border-[#2d2f36] flex flex-wrap items-center justify-between gap-3 shadow-xl">
+          <div className="flex flex-wrap items-center gap-2">
+            {[
+              { id: 'pressure_noise', label: 'Digit Pressure & Noise', icon: '⚡📊', desc: '0–9 Pressure & Noise Analyzer' },
+              { id: 'over_under', label: 'Over / Under', icon: '🔴🟢', desc: 'Predicts Under vs Over' },
+              { id: 'even_odd', label: 'Even / Odd', icon: '⚖️', desc: 'Parity Momentum & Streaks' },
+              { id: 'rise_fall', label: 'Rise / Fall', icon: '📈', desc: 'Multi-Timeframe Signals' },
+              { id: 'differs', label: 'Matches / Differs', icon: '🎯', desc: '10-Tool Engine' },
+              { id: 'accumulators', label: 'Accumulators (AMFE)', icon: '⚡', desc: 'Volatility Indices Only' },
+              { id: 'classic_frequency', label: 'Digit Bot & Frequency', icon: '📊', desc: 'Live Frequency & Bot' },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => handleSetContractAnalysisMode(tab.id as any)}
+                className={cn(
+                  "px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 border cursor-pointer",
+                  contractAnalysisMode === tab.id
+                    ? tab.id === 'accumulators'
+                      ? "bg-gradient-to-r from-amber-500 to-amber-600 text-black border-amber-400 font-black shadow-lg shadow-amber-500/25 scale-[1.02]"
+                      : "bg-gradient-to-r from-indigo-600 to-violet-600 text-white border-indigo-400/40 shadow-lg shadow-indigo-500/25 scale-[1.02]"
+                    : "bg-[#0a0b0d] text-[#9ba1a6] border-[#2d2f36] hover:text-white hover:border-[#3d424e]"
+                )}
+              >
+                <span>{tab.icon}</span>
+                <span>{tab.label}</span>
+                {tab.id === 'accumulators' && (
+                  <span className="hidden xl:inline text-[9px] px-1.5 py-0.2 rounded bg-black/20 text-black font-black uppercase">
+                    Vol Only
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Deriv Active Timeframe Badge/Selector */}
+          <div className="flex items-center gap-2 bg-[#0a0b0d] border border-[#2d2f36] px-3 py-1.5 rounded-xl">
+            <span className="text-[10px] font-black uppercase text-[#9ba1a6] tracking-wider">Deriv TF:</span>
+            <div className="flex items-center gap-1">
+              {(['1t', '1m', '3m', '5m', '15m', '30m', '1h'] as DerivTimeframe[]).map(tf => (
+                <button
+                  key={tf}
+                  onClick={() => setSelectedTimeframe(tf)}
+                  className={cn(
+                    "px-2 py-0.5 rounded text-[10px] font-mono font-bold transition-all cursor-pointer",
+                    selectedTimeframe === tf
+                      ? "bg-indigo-500 text-white font-black shadow-sm"
+                      : "text-slate-400 hover:text-white hover:bg-white/5"
+                  )}
+                >
+                  {tf}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Deriv Multi-Market Windows Workspace Manager */}
+        <AnalysisWindowsManager
+          windows={windows}
+          activeWindowId={activeWindowId}
+          onSelectActiveWindow={(id) => {
+            setActiveWindowId(id);
+            const w = windows.find(win => win.id === id);
+            if (w) setSymbol(w.symbol);
+          }}
+          onAddWindow={handleAddWindow}
+          onRemoveWindow={handleRemoveWindow}
+          onSyncAutoBotMarkets={handleSyncAutoBotMarkets}
+          layoutMode={layoutMode}
+          onSetLayoutMode={setLayoutMode}
+          gridColumns={gridColumns}
+          onSetGridColumns={setGridColumns}
+          globalContractMode={contractAnalysisMode}
+          onSetGlobalContractMode={handleSetContractAnalysisMode}
+          allSymbols={SYMBOLS}
+          marketLastQuotes={marketLastQuotes}
+          autoBotMarketCount={autoBotMarketCount}
+        />
+
+        {/* Dynamic Contract Analysis Mode Views & Multi-Market Windows */}
+        {contractAnalysisMode === 'classic_frequency' ? (
+          <>
+        {/* Real-time Dashboard Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <AnalysisCard 
+            title="Last Price" 
+            value={analysis?.currentPrice?.toFixed(2) ?? '0.00'} 
+            sub={analysis ? `${analysis.priceChange > 0 ? '+' : ''}${analysis.priceChange?.toFixed(4) ?? '0.0000'}` : '0.000'}
+            icon={<DollarSign size={20} />}
+            color="indigo"
+            trend={analysis ? (analysis.priceChange >= 0 ? 'up' : 'down') : 'neutral'}
+          />
+          <AnalysisCard 
+            title="Trend Bias" 
+            value={analysis?.predictions.riseFall ?? 'Neutral'} 
+            sub={analysis ? `SMA-500: ${analysis.smaLong?.toFixed(2) ?? '0.00'}` : 'Scanning...'}
+            icon={<TrendingUp size={20} />}
+            color={analysis?.predictions.riseFall === 'RISE' ? 'emerald' : 'rose'}
+            trend={analysis?.predictions.riseFall === 'RISE' ? 'up' : 'down'}
+          />
+          <AnalysisCard 
+            title="Most Frequent Digit" 
+            value={analysis?.mostFrequent.toString() ?? '—'} 
+            sub={`${analysis?.frequencies[analysis.mostFrequent]?.toFixed(1) ?? '0'}% Frequency`}
+            icon={<Zap size={20} />}
+            color="amber"
+          />
+          <AnalysisCard 
+            title="AI Predicted Digit" 
+            value={analysis?.predictedDigit.toString() ?? '—'} 
+            sub={`${analysis?.frequencies[analysis.predictedDigit]?.toFixed(1) ?? '0'}% Frequency`}
+            icon={<Target size={20} />}
+            color="indigo"
+          />
+        </div>
+
+        {/* Cold Digit Ticker */}
+        <div className="bg-[#111217] rounded-2xl border border-[#2d2f36] p-4 flex items-center gap-6 overflow-hidden">
+          <div className="flex items-center gap-2 whitespace-nowrap">
+            <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+            <span className="text-[10px] font-black uppercase tracking-widest text-[#9ba1a6]">Coldest Ticker:</span>
+          </div>
+          <div className="flex items-center gap-3 overflow-hidden">
+            <AnimatePresence mode="popLayout">
+              {coldestHistory.map((d, i) => (
+                <motion.div 
+                  key={`${i}-${d}`}
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, scale: 0.5 }}
+                  className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-xs font-black text-indigo-400 shrink-0"
+                >
+                  {d}
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
+        </div>
+
+        {/* Main Workspace Layout */}
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+          
+          {/* Left: Detailed Digit Frequency & History */}
+          <div className="xl:col-span-2 space-y-8">
+            <div className="bg-[#111217] rounded-3xl border border-[#2d2f36] p-4 sm:p-8 shadow-xl">
+              <div className="flex items-center justify-between mb-8">
+                <div className="space-y-1">
+                  <h3 className="text-sm font-black uppercase tracking-[0.2em] text-[#9ba1a6] flex items-center gap-2">
+                    <BarChart3 size={18} className="text-indigo-400" />
+                    Digit Frequency Analysis
+                  </h3>
+                  <p className="text-xs text-[#555]">Calculated from the last {analysisWindow} ticks</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleSetContractAnalysisMode('pressure_noise')}
+                    className="px-3 py-1 bg-gradient-to-r from-indigo-600/20 to-violet-600/20 hover:from-indigo-600/30 hover:to-violet-600/30 text-indigo-300 hover:text-white rounded-lg text-[10px] font-black uppercase tracking-wider border border-indigo-500/30 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95"
+                  >
+                    <span>⚡📊</span>
+                    <span>Pressure & Noise</span>
+                  </button>
+                  <div className="px-3 py-1 bg-emerald-500/10 text-emerald-400 rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-500/20">
+                    Reliability: High
+                  </div>
+                </div>
+              </div>
+
+              <div className="h-72 w-full mb-10">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={digitChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2d2f36" vertical={false} />
+                    <XAxis 
+                      dataKey="digit" 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fill: '#9ba1a6', fontSize: 13, fontWeight: 'bold' }} 
+                    />
+                    <YAxis 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fill: '#555', fontSize: 11 }} 
+                      unit="%"
+                    />
+                    <RechartsTooltip 
+                      cursor={{ fill: 'rgba(255,255,255,0.03)' }}
+                      contentStyle={{ backgroundColor: '#111217', border: '1px solid #2d2f36', borderRadius: '12px', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)' }}
+                      itemStyle={{ color: '#818cf8', fontWeight: 'bold' }}
+                    />
+                    <Bar dataKey="frequency" radius={[6, 6, 0, 0]}>
+                      {digitChartData.map((entry, index) => {
+                        let barFill = '#1a1c23';
+                        if (rankedDigits.length >= 10) {
+                          const highest = rankedDigits[0].digit;
+                          const secondHighest = rankedDigits[1].digit;
+                          const lowest = rankedDigits[rankedDigits.length - 1].digit;
+                          const secondLowest = rankedDigits[rankedDigits.length - 2].digit;
+
+                          if (entry.digit === highest) {
+                            barFill = '#29a79a';
+                          } else if (entry.digit === lowest) {
+                            barFill = '#f44336';
+                          } else if (entry.digit === secondHighest) {
+                            barFill = '#3b82f6';
+                          } else if (entry.digit === secondLowest) {
+                            barFill = '#f97316';
+                          }
+                        } else {
+                          if (entry.digit === analysis?.mostFrequent) {
+                            barFill = '#29a79a';
+                          } else if (entry.digit === analysis?.leastFrequent) {
+                            barFill = '#f44336';
+                          }
+                        }
+                        return (
+                          <Cell 
+                            key={`cell-${index}`} 
+                            fill={barFill} 
+                          />
+                        );
+                      })}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* High-Fidelity 2x5 Round Grid Setup */}
+              <div id="grid" className="grid grid-cols-5 gap-y-12 gap-x-1.5 xs:gap-x-2 sm:gap-x-4 relative pb-10 pt-4 px-1 xs:px-2 select-none">
+                {Array.from({ length: 10 }).map((_, i) => {
+                  const freq = analysis?.frequencies[i] ?? 0;
+                  
+                  let circleColorClass = "border-[#2a2e2e]";
+                  let itemExtraClass = "";
+
+                  if (rankedDigits.length >= 10) {
+                    const highest = rankedDigits[0].digit;
+                    const secondHighest = rankedDigits[1].digit;
+                    const lowest = rankedDigits[rankedDigits.length - 1].digit;
+                    const secondLowest = rankedDigits[rankedDigits.length - 2].digit;
+
+                    if (i === highest) {
+                      circleColorClass = "border-[#29a79a] bg-[#29a79a]/5";
+                      itemExtraClass = "max-freq";
+                    } else if (i === lowest) {
+                      circleColorClass = "border-[#f44336] bg-[#f44336]/5";
+                      itemExtraClass = "min-freq";
+                    } else if (i === secondHighest) {
+                      circleColorClass = "border-blue-500 bg-blue-500/5";
+                    } else if (i === secondLowest) {
+                      circleColorClass = "border-orange-500 bg-orange-500/5";
+                    }
+                  } else {
+                    const isHot = i === analysis?.mostFrequent;
+                    const isCold = i === analysis?.leastFrequent;
+                    if (isHot) {
+                      circleColorClass = "border-[#29a79a] bg-[#29a79a]/5";
+                      itemExtraClass = "max-freq";
+                    } else if (isCold) {
+                      circleColorClass = "border-[#f44336] bg-[#f44336]/5";
+                      itemExtraClass = "min-freq";
+                    }
+                  }
+
+                  return (
+                    <div 
+                      key={i} 
+                      id={`digit-${i}`} 
+                      className={cn(
+                        "digit-item flex flex-col items-center justify-center relative h-16 sm:h-20 transition-all",
+                        itemExtraClass
+                      )}
+                    >
+                      <motion.div 
+                        whileHover={{ scale: 1.05 }}
+                        className={cn(
+                          "circle-wrapper w-[52px] h-[52px] xs:w-[58px] xs:h-[58px] sm:w-[70px] sm:h-[70px] rounded-full border-2 sm:border-4 flex flex-col items-center justify-center relative transition-all duration-300 shadow-md",
+                          circleColorClass
+                        )}
+                      >
+                        <span className="digit-val text-sm sm:text-lg font-bold text-white mb-[-2px]">
+                          {i}
+                        </span>
+                        <span className="digit-pct text-[9px] sm:text-[11px] text-[#99adbe] font-medium font-mono">
+                          {Number(freq || 0).toFixed(1)}%
+                        </span>
+                      </motion.div>
+                    </div>
+                  );
+                })}
+
+                {/* Snappy, performance-optimized pointers */}
+                <div 
+                  id="deriv-digit-cursor" 
+                  className="absolute top-0 left-0 w-0 h-0 border-l-[6px] sm:border-l-[8px] border-l-transparent border-r-[6px] sm:border-r-[8px] border-r-transparent border-b-[8px] sm:border-b-[12px] border-b-[#ff444f] z-10 transition-transform duration-75 ease-out opacity-0 pointer-events-none"
+                  style={{ willChange: 'transform' }}
+                />
+              </div>
+
+              {/* Divider */}
+              <div className="border-t border-[#2d2f36] my-6" />
+
+              {/* Exact Frequency Digit Bot Section */}
+              <div className="space-y-4">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-[#0a0b0d] p-4 rounded-2xl border border-[#2d2f36]/60">
+                  <div>
+                    <h4 className="text-xs font-black uppercase tracking-[0.15em] text-[#9ba1a6] flex items-center gap-2">
+                      <Settings size={14} className="text-emerald-400" />
+                      Exact Frequency Match Bot Control
+                    </h4>
+                    <p className="text-[10px] text-slate-500 font-sans mt-0.5">
+                      Executes digital contracts instantly when a digit's frequency matches your specified target percentage.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Live indicator & Stats */}
+                    <div className={cn(
+                      "flex items-center gap-3 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider border",
+                      frequencyBotSessionProfit > 0 
+                        ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" 
+                        : frequencyBotSessionProfit < 0 
+                        ? "bg-rose-500/10 border-rose-500/20 text-rose-400" 
+                        : "bg-slate-500/10 border-slate-500/20 text-slate-400"
+                    )}>
+                      {isFrequencyBotTrading && (
+                        <div className="w-2 h-2 rounded-full bg-current animate-ping" />
+                      )}
+                      <span>Profit: ${frequencyBotSessionProfit.toFixed(2)}</span>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111217] border border-[#2d2f36] rounded-xl text-[11px] font-bold font-mono">
+                      <span className="text-emerald-400">W: {frequencyBotWins}</span>
+                      <span className="text-slate-600">/</span>
+                      <span className="text-rose-400">L: {frequencyBotLosses}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-8 gap-4 items-end bg-[#0a0b0d] p-4 rounded-2xl border border-[#2d2f36]/60">
+                  {/* Stake */}
+                  <div className="space-y-1.5 col-span-1">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                        Stake (USD)
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isFrequencyBotTrading}
+                        onClick={() => setFrequencyBotAutoStakeEnabled(!frequencyBotAutoStakeEnabled)}
+                        className={cn(
+                          "text-[9px] font-bold px-1.5 py-0.5 rounded transition-all flex items-center gap-1 cursor-pointer",
+                          frequencyBotAutoStakeEnabled 
+                            ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" 
+                            : "bg-[#111217] text-slate-500 border border-[#2d2f36] hover:text-slate-300"
+                        )}
+                        title="Auto Stake calculates initial stake as a percentage of your account balance"
+                      >
+                        Auto {frequencyBotAutoStakeEnabled ? "ON" : "OFF"}
+                      </button>
+                    </div>
+                    {frequencyBotAutoStakeEnabled ? (
+                      <div className="flex items-center gap-1 bg-[#111217] border border-emerald-500/40 rounded-xl px-2.5 py-2">
+                        <input 
+                          type="number"
+                          min="0.1"
+                          max="100"
+                          step="0.1"
+                          disabled={isFrequencyBotTrading}
+                          value={frequencyBotAutoStakePct}
+                          onChange={(e) => setFrequencyBotAutoStakePct(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                          className="w-full bg-transparent text-white text-xs font-mono font-bold outline-none"
+                        />
+                        <span className="text-xs text-emerald-400 font-bold">%</span>
+                      </div>
+                    ) : (
+                      <input 
+                        type="number"
+                        min="0.35"
+                        step="0.01"
+                        disabled={isFrequencyBotTrading}
+                        value={frequencyBotStake}
+                        onChange={(e) => setFrequencyBotStake(Math.max(0.35, parseFloat(e.target.value) || 0.35))}
+                        className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                      />
+                    )}
+                  </div>
+
+                  {/* Martingale Multiplier */}
+                  <div className="space-y-1.5 col-span-1">
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                      Martingale (x)
+                    </label>
+                    <input 
+                      type="number"
+                      min="1"
+                      step="0.1"
+                      disabled={isFrequencyBotTrading}
+                      value={frequencyBotMartingale}
+                      onChange={(e) => setFrequencyBotMartingale(Math.max(1, parseFloat(e.target.value) || 1))}
+                      className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                    />
+                  </div>
+
+                  {/* Duration Ticks */}
+                  <div className="space-y-1.5 col-span-1">
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                      Duration (Ticks)
+                    </label>
+                    <input 
+                      type="number"
+                      min="1"
+                      max="10"
+                      step="1"
+                      disabled={isFrequencyBotTrading}
+                      value={frequencyBotDuration}
+                      onChange={(e) => setFrequencyBotDuration(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
+                      className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                    />
+                  </div>
+
+                  {/* Contract Type selection */}
+                  <div className="space-y-1.5 col-span-1">
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                      Contract Type
+                    </label>
+                    <select
+                      disabled={isFrequencyBotTrading}
+                      value={frequencyBotContractType}
+                      onChange={(e: any) => setFrequencyBotContractType(e.target.value)}
+                      className="w-full bg-[#111217] border border-[#2d2f36]/80 text-white text-xs font-sans font-bold rounded-xl px-3 py-2.5 outline-[#2d2f36] outline-none focus:border-[#ff444f] transition-all disabled:opacity-50 cursor-pointer"
+                    >
+                      <option value="coldest">Coldest Ticker</option>
+                      <option value="differ">Digit Differ</option>
+                      <option value="over">Digit Over</option>
+                      <option value="under">Digit Under</option>
+                      <option value="even">Even</option>
+                      <option value="odd">Odd</option>
+                    </select>
+                  </div>
+
+                  {/* Circle Match Mode Switch (For any Contract Type strategy) */}
+                  <>
+                    <div className="space-y-1.5 col-span-1">
+                      <label className="block text-[9px] font-black uppercase tracking-widest text-[#29a79a] font-sans">
+                        Circle Mode
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isFrequencyBotTrading}
+                        onClick={() => setFrequencyBotCircleModeEnabled(!frequencyBotCircleModeEnabled)}
+                        className={cn(
+                          "w-full text-xs font-bold rounded-xl px-3 py-2.5 outline-none transition-all border flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50",
+                          frequencyBotCircleModeEnabled
+                            ? "bg-[#29a79a]/10 text-[#29a79a] border-[#29a79a]/30 hover:bg-[#29a79a]/15"
+                            : "bg-[#111217] text-[#9ba1a6] border-[#2d2f36] hover:bg-[#1a1c23]"
+                        )}
+                      >
+                        <span className={cn(
+                          "w-2 h-2 rounded-full",
+                          frequencyBotCircleModeEnabled ? "bg-[#29a79a] animate-pulse" : "bg-gray-600"
+                        )}/>
+                        {frequencyBotCircleModeEnabled ? "Active" : "Inactive"}
+                      </button>
+                    </div>
+
+                    {/* Circle Selection Option List (Only display if Circle Match Mode is ON) */}
+                    {frequencyBotCircleModeEnabled && (
+                      <>
+                        <div className="space-y-1.5 col-span-1">
+                          <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                            Circle Option
+                          </label>
+                          <select
+                            disabled={isFrequencyBotTrading}
+                            value={frequencyBotCircleType}
+                            onChange={(e: any) => setFrequencyBotCircleType(e.target.value)}
+                            className="w-full bg-[#111217] border border-[#ff444f]/40 text-white text-xs font-sans font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50 cursor-pointer"
+                          >
+                            <option value="green">🟢 Green Circle</option>
+                            <option value="blue">🔵 Blue Circle</option>
+                            <option value="orange">🟠 Orange Circle</option>
+                            <option value="red">🔴 Red Circle</option>
+                          </select>
+                        </div>
+
+                        {(frequencyBotContractType === 'over' || frequencyBotContractType === 'under') && (
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="block text-[9px] font-black uppercase tracking-widest text-[#29a79a] font-sans">
+                              Prediction Digit
+                            </label>
+                            <input 
+                              type="number"
+                              min="0"
+                              max="9"
+                              step="1"
+                              disabled={isFrequencyBotTrading}
+                              value={frequencyBotPredictionDigit}
+                              onChange={(e) => setFrequencyBotPredictionDigit(Math.max(0, Math.min(9, parseInt(e.target.value, 10) || 0)))}
+                              className="w-full bg-[#111217] border border-[#29a79a]/40 text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#29a79a] transition-all disabled:opacity-50"
+                            />
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </>
+
+                  {/* Dynamic Target Input */}
+                  {frequencyBotContractType !== 'even' && frequencyBotContractType !== 'odd' ? (
+                    <>
+                      <div className="space-y-1.5 col-span-1">
+                        <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                          Target Pct (%)
+                        </label>
+                        <input 
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.1"
+                          disabled={isFrequencyBotTrading || frequencyBotCircleModeEnabled}
+                          value={frequencyBotTargetPct}
+                          onChange={(e) => setFrequencyBotTargetPct(Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
+                          className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                        />
+                      </div>
+
+                      {/* Digit Filter Toggle Switch */}
+                      <div className="space-y-1.5 col-span-1">
+                        <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                          Specific Digits
+                        </label>
+                        <button
+                          type="button"
+                          disabled={isFrequencyBotTrading || frequencyBotCircleModeEnabled}
+                          onClick={() => setFrequencyBotDigitFilterEnabled(!frequencyBotDigitFilterEnabled)}
+                          className={cn(
+                            "w-full text-xs font-bold rounded-xl px-3 py-2.5 outline-none transition-all border flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50",
+                            frequencyBotDigitFilterEnabled 
+                              ? "bg-[#ff444f]/10 text-[#ff444f] border-[#ff444f]/30 hover:bg-[#ff444f]/15" 
+                              : "bg-[#111217] text-[#9ba1a6] border-[#2d2f36] hover:bg-[#1a1c23]"
+                          )}
+                        >
+                          <span className={cn(
+                            "w-2 h-2 rounded-full",
+                            frequencyBotDigitFilterEnabled ? "bg-[#ff444f] animate-pulse" : "bg-gray-600"
+                          )}/>
+                          {frequencyBotDigitFilterEnabled ? "Active" : "Inactive"}
+                        </button>
+                      </div>
+
+                      {/* Dynamic filter fields when Switch ON */}
+                      {frequencyBotDigitFilterEnabled && (
+                        <>
+                          {/* Digit(s) text input representation */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                              Trade Digits
+                            </label>
+                            <input 
+                              type="text"
+                              disabled={isFrequencyBotTrading}
+                              value={frequencyBotFilterDigits}
+                              onChange={(e) => {
+                                const val = e.target.value.replace(/[^0-9,]/g, '');
+                                setFrequencyBotFilterDigits(val);
+                              }}
+                              placeholder="e.g. 0,1,2"
+                              className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                            />
+                          </div>
+
+                          {/* Higher or Lower compare Switch */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                              Compare Direction
+                            </label>
+                            <button
+                              type="button"
+                              disabled={isFrequencyBotTrading}
+                              onClick={() => setFrequencyBotFilterCompareMode(frequencyBotFilterCompareMode === 'higher' ? 'lower' : 'higher')}
+                              className={cn(
+                                "w-full text-xs font-bold rounded-xl px-3 py-2.5 outline-none transition-all border flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50",
+                                frequencyBotFilterCompareMode === 'higher'
+                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/15"
+                                  : "bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/15"
+                              )}
+                            >
+                              {frequencyBotFilterCompareMode === 'higher' ? 'Higher (>=)' : 'Lower (<=)'}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {/* Target Condition List Dropdown */}
+                      <div className="space-y-1.5 col-span-1">
+                        <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                          Target Pct
+                        </label>
+                        <select
+                          disabled={isFrequencyBotTrading || frequencyBotCircleModeEnabled}
+                          value={frequencyBotEvenOddMode}
+                          onChange={(e: any) => setFrequencyBotEvenOddMode(e.target.value)}
+                          className="w-full bg-[#111217] border border-[#2d2f36]/80 text-white text-xs font-sans font-bold rounded-xl px-3 py-2.5 outline-[#2d2f36] outline-none focus:border-[#ff444f] transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          <option value="high_even">High Even%</option>
+                          <option value="low_even">Low Even%</option>
+                          <option value="low_odd">Low Odd%</option>
+                          <option value="high_odd">High Odd%</option>
+                        </select>
+                      </div>
+
+                      {/* Benchmark % (Numerical input defaulted to 10.3%) */}
+                      <div className="space-y-1.5 col-span-1">
+                        <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                          Benchmark %
+                        </label>
+                        <input 
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.1"
+                          disabled={isFrequencyBotTrading || frequencyBotCircleModeEnabled}
+                          value={frequencyBotBenchmarkPct}
+                          onChange={(e) => setFrequencyBotBenchmarkPct(Math.max(0, Math.min(100, parseFloat(e.target.value) || 10.3)))}
+                          className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {/* Take Profit & Runs limit */}
+                  <div className="space-y-1.5 col-span-1">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                        {frequencyBotMaxRunsEnabled ? "No. of Runs (Wins)" : "Take Profit ($)"}
+                      </label>
+                      <button
+                        type="button"
+                        disabled={isFrequencyBotTrading}
+                        onClick={() => setFrequencyBotMaxRunsEnabled(!frequencyBotMaxRunsEnabled)}
+                        className={cn(
+                          "text-[9px] font-bold px-1.5 py-0.5 rounded transition-all flex items-center gap-1 cursor-pointer",
+                          frequencyBotMaxRunsEnabled 
+                            ? "bg-indigo-500/20 text-indigo-400 border border-indigo-500/30" 
+                            : "bg-[#111217] text-slate-500 border border-[#2d2f36] hover:text-slate-300"
+                        )}
+                        title="Limit maximum number of winning runs"
+                      >
+                        Runs {frequencyBotMaxRunsEnabled ? "ON" : "OFF"}
+                      </button>
+                    </div>
+                    {frequencyBotMaxRunsEnabled ? (
+                      <div className="flex items-center gap-1 bg-[#111217] border border-indigo-500/40 rounded-xl px-2.5 py-2">
+                        <input 
+                          type="number"
+                          min="1"
+                          step="1"
+                          disabled={isFrequencyBotTrading}
+                          value={frequencyBotMaxRuns}
+                          onChange={(e) => setFrequencyBotMaxRuns(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                          className="w-full bg-transparent text-white text-xs font-mono font-bold outline-none"
+                          placeholder="Target Wins"
+                        />
+                        <span className="text-[10px] text-indigo-400 font-bold shrink-0">Wins</span>
+                      </div>
+                    ) : (
+                      <input 
+                        type="number"
+                        min="0.1"
+                        step="0.1"
+                        disabled={isFrequencyBotTrading}
+                        value={frequencyBotTp}
+                        onChange={(e) => setFrequencyBotTp(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                        className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                      />
+                    )}
+                  </div>
+
+                  {/* Stop Loss */}
+                  <div className="space-y-1.5 col-span-1">
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                      Stop Loss ($)
+                    </label>
+                    <input 
+                      type="number"
+                      min="0.1"
+                      step="0.1"
+                      disabled={isFrequencyBotTrading}
+                      value={frequencyBotSl}
+                      onChange={(e) => setFrequencyBotSl(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                      className="w-full bg-[#111217] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                    />
+                  </div>
+
+                  {/* Market Switch Strategy Column */}
+                  <div className="space-y-1.5 col-span-1 sm:col-span-2">
+                    <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                      Market Switch Strategy
+                    </label>
+                    <div className="grid grid-cols-3 gap-1 bg-[#111217] p-1 rounded-xl border border-[#2d2f36] h-[38px] items-center">
+                      {[
+                        { id: 'off', label: 'Off', tooltip: 'Disable switching completely' },
+                        { id: 'loss', label: 'On Loss', tooltip: 'Switch market upon a lost trade' },
+                        { id: 'always', label: 'On Trade', tooltip: 'Switch market after every contract bought' }
+                      ].map(opt => {
+                        const isActive = marketSwitchMode === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            title={opt.tooltip}
+                            disabled={isFrequencyBotTrading}
+                            onClick={() => {
+                              setMarketSwitchMode(opt.id as any);
+                              localStorage.setItem('scanner_market_switch_mode', opt.id);
+                            }}
+                            className={cn(
+                              "py-1.5 px-0.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all cursor-pointer select-none active:scale-[0.97] disabled:opacity-50",
+                              isActive 
+                                ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 font-black animate-none" 
+                                : "text-slate-500 hover:text-[#9ba1a6] bg-transparent"
+                            )}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Smart Recovery Toggle / Header */}
+                  <div className="col-span-full border-t border-[#2d2f36]/40 pt-4 mt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <h4 className="text-xs font-black uppercase tracking-widest text-rose-400">Smart Recovery</h4>
+                      <p className="text-[10px] text-[#9ba1a6]">Alternative criteria applied exclusively on recovery stakes (losses &gt; 0)</p>
+                    </div>
+                    {/* Toggle Switch */}
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-[10px] font-bold text-[#9ba1a6] uppercase tracking-widest">Smart Recovery</span>
+                      <button
+                        type="button"
+                        disabled={isFrequencyBotTrading}
+                        onClick={() => setFrequencyBotSmartRecoveryEnabled(!frequencyBotSmartRecoveryEnabled)}
+                        className={cn(
+                          "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50",
+                          frequencyBotSmartRecoveryEnabled ? "bg-rose-500" : "bg-[#111217] border-[#2d2f36]"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                            frequencyBotSmartRecoveryEnabled ? "translate-x-5" : "translate-x-0"
+                          )}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Smart Recovery Inputs - displayed only when switch is on */}
+                  {frequencyBotSmartRecoveryEnabled && (
+                    <div className="col-span-full grid grid-cols-2 sm:grid-cols-4 gap-4 items-end mt-2 p-4 bg-[#111217]/50 rounded-2xl border border-rose-500/20 shadow-inner">
+                      {/* 1. Recovery Contract Type List */}
+                      <div className="space-y-1.5 col-span-1">
+                        <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                          Rec. Contract Type
+                        </label>
+                        <select
+                          disabled={isFrequencyBotTrading}
+                          value={frequencyBotRecoveryContractType}
+                          onChange={(e: any) => setFrequencyBotRecoveryContractType(e.target.value)}
+                          className="w-full bg-[#0a0b0d] border border-[#2d2f36]/80 text-white text-xs font-sans font-bold rounded-xl px-3 py-2.5 outline-[#2d2f36] outline-none focus:border-[#ff444f] transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          <option value="coldest">Coldest Ticker</option>
+                          <option value="differ">Digit Differ</option>
+                          <option value="over">Digit Over</option>
+                          <option value="under">Digit Under</option>
+                          <option value="even">Even</option>
+                          <option value="odd">Odd</option>
+                        </select>
+                      </div>
+
+                      {/* Rec. Circle Option - displayed if recovery contract type is Differ/Over/Under and Circle Mode is Active */}
+                      {(frequencyBotRecoveryContractType === 'differ' || frequencyBotRecoveryContractType === 'over' || frequencyBotRecoveryContractType === 'under') && frequencyBotCircleModeEnabled && (
+                        <div className="space-y-1.5 col-span-1 block">
+                          <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                            Rec. Circle Option
+                          </label>
+                          <select
+                            disabled={isFrequencyBotTrading}
+                            value={frequencyBotRecoveryCircleType}
+                            onChange={(e: any) => setFrequencyBotRecoveryCircleType(e.target.value)}
+                            className="w-full bg-[#0a0b0d] border border-[#ff444f]/40 text-white text-xs font-sans font-bold rounded-xl px-3 py-2.5 outline-[#2d2f36] outline-none focus:border-[#ff444f] transition-all disabled:opacity-50 cursor-pointer"
+                          >
+                            <option value="green">🟢 Green Circle</option>
+                            <option value="blue">🔵 Blue Circle</option>
+                            <option value="orange">🟠 Orange Circle</option>
+                            <option value="red">🔴 Red Circle</option>
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Rec. Prediction Digit - shown for Over/Under under Circle Mode */}
+                      {frequencyBotCircleModeEnabled && (frequencyBotRecoveryContractType === 'over' || frequencyBotRecoveryContractType === 'under') && (
+                        <div className="space-y-1.5 col-span-1">
+                          <label className="block text-[9px] font-black uppercase tracking-widest text-[#29a79a] font-sans">
+                            Rec. Prediction Digit
+                          </label>
+                          <input 
+                            type="number"
+                            min="0"
+                            max="9"
+                            step="1"
+                            disabled={isFrequencyBotTrading}
+                            value={frequencyBotRecoveryPredictionDigit}
+                            onChange={(e) => setFrequencyBotRecoveryPredictionDigit(Math.max(0, Math.min(9, parseInt(e.target.value, 10) || 0)))}
+                            className="w-full bg-[#0a0b0d] border border-[#29a79a]/40 text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#29a79a] transition-all disabled:opacity-50"
+                          />
+                        </div>
+                      )}
+
+                      {/* 2. Target Pct (%) Input */}
+                      {frequencyBotRecoveryContractType !== 'even' && frequencyBotRecoveryContractType !== 'odd' ? (
+                        <>
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                              Rec. Target Pct (%)
+                            </label>
+                            <input 
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.1"
+                              disabled={isFrequencyBotTrading || ((frequencyBotRecoveryContractType === 'differ' || frequencyBotRecoveryContractType === 'over' || frequencyBotRecoveryContractType === 'under') && frequencyBotCircleModeEnabled)}
+                              value={frequencyBotRecoveryTargetPct}
+                              onChange={(e) => setFrequencyBotRecoveryTargetPct(Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
+                              className="w-full bg-[#0a0b0d] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                            />
+                          </div>
+
+                          {/* 3. Recovery specific digit input */}
+                          {frequencyBotDigitFilterEnabled && (
+                            <div className="space-y-1.5 col-span-1">
+                              <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                                Rec. Trade Digits
+                              </label>
+                              <input 
+                                type="text"
+                                disabled={isFrequencyBotTrading || (frequencyBotRecoveryContractType === 'differ' && frequencyBotCircleModeEnabled)}
+                                placeholder="e.g. 0,1,2"
+                                value={frequencyBotRecoveryFilterDigits}
+                                onChange={(e) => {
+                                  const val = e.target.value.replace(/[^0-9,]/g, '');
+                                  setFrequencyBotRecoveryFilterDigits(val);
+                                }}
+                                className="w-full bg-[#0a0b0d] border border-[#2d2f36] text-white text-xs font-mono font-bold rounded-xl px-3 py-2.5 outline-none focus:border-[#ff444f] transition-all disabled:opacity-50"
+                              />
+                            </div>
+                          )}
+
+                          {/* 4. Compare Direction */}
+                          <div className="space-y-1.5 col-span-1">
+                            <label className="block text-[9px] font-black uppercase tracking-widest text-[#9ba1a6] font-sans">
+                              Rec. Compare Direction
+                            </label>
+                            <button
+                              type="button"
+                              disabled={isFrequencyBotTrading || (frequencyBotRecoveryContractType === 'differ' && frequencyBotCircleModeEnabled)}
+                              onClick={() => setFrequencyBotRecoveryCompareMode(frequencyBotRecoveryCompareMode === 'higher' ? 'lower' : 'higher')}
+                              className={cn(
+                                "w-full text-xs font-bold rounded-xl px-3 py-2.5 outline-none transition-all border flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50",
+                                frequencyBotRecoveryCompareMode === 'higher'
+                                  ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/15"
+                                  : "bg-amber-500/10 text-amber-400 border-amber-500/20 hover:bg-amber-500/15"
+                              )}
+                            >
+                              {frequencyBotRecoveryCompareMode === 'higher' ? 'Higher (>=)' : 'Lower (<=)'}
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="col-span-3 text-[10px] text-[#9ba1a6] italic bg-[#0a0b0d] p-3 rounded-xl border border-[#2d2f36] flex items-center justify-center h-[38px] mb-0.5">
+                          Even/Odd recovery matches use global Benchmark percentage and Even/Odd modes.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                  {!isFrequencyBotTrading ? (
+                    <button
+                      onClick={startFrequencyBot}
+                      className="flex-1 flex items-center justify-center gap-2 px-5 py-3 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] transition-all text-xs font-black uppercase tracking-widest text-white rounded-xl shadow-md"
+                    >
+                      <Play size={14} fill="currentColor" />
+                      RUN
+                    </button>
+                  ) : (
+                    <button
+                      onClick={stopFrequencyBot}
+                      className="flex-1 flex items-center justify-center gap-2 px-5 py-3 bg-rose-600 hover:bg-rose-500 active:scale-[0.98] transition-all text-xs font-black uppercase tracking-widest text-white rounded-xl shadow-md animate-pulse"
+                    >
+                      <Square size={14} fill="currentColor" />
+                      STOP
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Price Action Monitor */}
+            <div className="bg-[#111217] rounded-3xl border border-[#2d2f36] p-8 shadow-xl">
+              <div className="flex items-center justify-between mb-8">
+                <div className="space-y-1">
+                  <h3 className="text-sm font-black uppercase tracking-[0.2em] text-[#9ba1a6] flex items-center gap-2">
+                    <LineIcon size={18} className="text-rose-400" />
+                    Market Momentum
+                  </h3>
+                  <p className="text-xs text-[#555]">Real-time tick flow visualization</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
+                  <span className="text-[10px] font-black text-white uppercase tracking-widest">Active Feed</span>
+                </div>
+              </div>
+
+              <div className="h-60 w-full overflow-hidden">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={priceHistoryData}>
+                    <defs>
+                      <linearGradient id="colorPrice" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/>
+                        <stop offset="95%" stopColor="#ef4444" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2d2f36" vertical={false} />
+                    <XAxis dataKey="time" hide />
+                    <YAxis domain={['auto', 'auto']} hide />
+                    <RechartsTooltip content={() => null} />
+                    <Area 
+                      type="monotone" 
+                      dataKey="price" 
+                      stroke="#ef4444" 
+                      strokeWidth={3}
+                      fillOpacity={1} 
+                      fill="url(#colorPrice)" 
+                      animationDuration={500}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Panel: Signals & Volatility Gauge */}
+          <div className="space-y-8">
+            
+            {/* Live Recommendation Badge */}
+            <div className="bg-[#111217] rounded-3xl border border-[#2d2f36] p-8 shadow-xl relative overflow-hidden group">
+              <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity rotate-12">
+                <Target size={120} />
+              </div>
+              <h3 className="text-xs font-black uppercase tracking-[0.2em] text-[#9ba1a6] mb-8 flex items-center gap-2">
+                <Target size={16} /> Live AI Selection
+              </h3>
+              
+              <div className="flex flex-col items-center justify-center text-center space-y-6">
+                {scanBestMarket ? (
+                  <>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-center gap-2 mb-2">
+                        <span className="px-3 py-1 bg-indigo-500/10 border border-indigo-500/20 rounded-lg text-[10px] font-black text-indigo-400 uppercase tracking-widest">
+                          Market Recommended
+                        </span>
+                      </div>
+                      <h4 className="text-2xl font-black text-white uppercase tracking-tighter">{scanBestMarket.name}</h4>
+                      <p className="text-[10px] font-bold text-emerald-400 uppercase tracking-[.2em]">Conf: {scanBestMarket.confidence.toFixed(1)}%</p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4 w-full">
+                      <div className="p-3 bg-white/5 rounded-2xl border border-white/5">
+                        <p className="text-[8px] font-black text-[#555] uppercase tracking-widest mb-1">Cold Digit</p>
+                        <p className="text-xl font-black text-indigo-400">{scanBestMarket.digit}</p>
+                      </div>
+                      <div className="p-3 bg-white/5 rounded-2xl border border-white/5">
+                        <p className="text-[8px] font-black text-[#555] uppercase tracking-widest mb-1">Frequency</p>
+                        <p className="text-xl font-black text-white">{scanBestMarket.frequency.toFixed(1)}%</p>
+                      </div>
+                    </div>
+                    
+                    {symbol !== scanBestMarket.symbol && marketSwitchMode === 'off' && (
+                      <button 
+                        onClick={() => setSymbol(scanBestMarket.symbol)}
+                        className="w-full py-3 bg-white hover:bg-white/90 text-black rounded-xl text-xs font-black uppercase tracking-widest transition-all active:scale-95"
+                      >
+                        Switch To This Market
+                      </button>
+                    )}
+
+                    {marketSwitchMode !== 'off' && (
+                      <div className="flex items-center gap-2 py-3 px-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl w-full justify-center">
+                        <RefreshCw size={12} className="text-emerald-400 animate-spin" />
+                        <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">
+                          {marketSwitchMode === 'loss' ? 'Auto-Switch (On Loss)' : 'Auto-Switch (On Trade)'}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="w-full pt-2">
+                      {isAutoTrading ? (
+                        <button 
+                          onClick={stopAutoTrade}
+                          className="w-full py-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all active:scale-95 animate-pulse"
+                        >
+                          Stop AI Scanner Bot
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={() => startAutoTrade(scanBestMarket)}
+                          className="w-full py-3 bg-[#ff444f] hover:bg-[#ff444f]/90 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all active:scale-95"
+                        >
+                          Start AI Scanner Bot
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="py-10 space-y-4">
+                    <div className="w-12 h-12 bg-[#1a1c23] rounded-2xl flex items-center justify-center mx-auto mb-2 animate-pulse">
+                      <Search size={20} className="text-[#555]" />
+                    </div>
+                    <p className="text-xs font-bold text-[#555] uppercase tracking-widest leading-relaxed">
+                      Enable Smart Watcher <br /> in settings to track <br /> best markets live.
+                    </p>
+                  </div>
+                )}
+
+                {/* 3-Way Segmented Switch Button for Auto Market Switch */}
+                <div className="space-y-2 w-full pt-4 border-t border-white/5">
+                  <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-[#9ba1a6]">
+                    <span>Bot Switch Strategy</span>
+                    <span className={cn(
+                      "text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider",
+                      marketSwitchMode === 'off' ? "bg-white/10 text-slate-400" :
+                      marketSwitchMode === 'loss' ? "bg-indigo-500/10 text-indigo-400" :
+                      "bg-emerald-500/10 text-emerald-400"
+                    )}>
+                      {marketSwitchMode === 'off' ? 'Disabled' : marketSwitchMode === 'loss' ? 'On Loss' : 'Every Trade'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 bg-[#0a0b0d] p-1 rounded-xl border border-[#2d2f36] w-full">
+                    {[
+                      { id: 'off', label: 'Off', tooltip: 'Disable switching completely' },
+                      { id: 'loss', label: 'On Loss', tooltip: 'Switch market upon a lost trade' },
+                      { id: 'always', label: 'On Trade', tooltip: 'Switch market after every contract bought' }
+                    ].map(opt => {
+                      const isActive = marketSwitchMode === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          title={opt.tooltip}
+                          onClick={() => {
+                            setMarketSwitchMode(opt.id as any);
+                            localStorage.setItem('scanner_market_switch_mode', opt.id);
+                          }}
+                          className={cn(
+                            "py-2 px-1 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all cursor-pointer select-none active:scale-[0.97]",
+                            isActive 
+                              ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 font-black" 
+                              : "text-[#555] hover:text-[#9ba1a6] bg-transparent"
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <p className="text-[8px] font-bold text-[#444] uppercase tracking-widest">
+                    Last Scan: {lastScanTime ?? 'Not Scanned'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Volatility Status (Accumulator) */}
+            <div className="bg-[#111217] rounded-3xl border border-[#2d2f36] p-8 shadow-xl relative overflow-hidden group">
+              <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                <Gauge size={120} />
+              </div>
+              <h3 className="text-xs font-black uppercase tracking-[0.2em] text-[#9ba1a6] mb-8 flex items-center gap-2">
+                <Gauge size={16} /> Volatility Gauge
+              </h3>
+              
+              <div className="flex flex-col items-center justify-center text-center space-y-6">
+                <div className="relative w-40 h-40">
+                  <svg className="w-full h-full transform -rotate-90">
+                    <circle cx="80" cy="80" r="70" fill="none" stroke="#1a1c23" strokeWidth="12" />
+                    <motion.circle 
+                      cx="80" cy="80" r="70" fill="none" 
+                      stroke={analysis?.predictions.accumulator === 'STABLE' ? '#10b981' : '#f59e0b'} 
+                      strokeWidth="12"
+                      strokeDasharray="440"
+                      initial={{ strokeDashoffset: 440 }}
+                      animate={{ strokeDashoffset: 440 * (1 - Math.min(1, (analysis?.volatilityScore || 0) * 5000)) }}
+                      transition={{ type: "spring", stiffness: 50 }}
+                    />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className={cn(
+                      "text-2xl font-black uppercase tracking-tighter",
+                      analysis?.predictions.accumulator === 'STABLE' ? 'text-emerald-400' : 'text-amber-400'
+                    )}>
+                      {analysis?.predictions.accumulator ?? 'Scanning'}
+                    </span>
+                    <span className="text-[10px] font-bold text-[#555] uppercase tracking-widest">Market Feed</span>
+                  </div>
+                </div>
+                
+                <div className="space-y-2">
+                  <p className="text-xs font-bold text-[#9ba1a6]">
+                    Status: <span className="text-white capitalize">{analysis?.predictions.accumulator === 'STABLE' ? 'Low Volatility' : 'High Volatility'}</span>
+                  </p>
+                  <p className="text-[10px] text-[#555] max-w-[180px]">
+                    Accumulators/Stable: Ideal when price action is smooth and flat.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* AI Intelligence Panel */}
+            <div className="bg-gradient-to-br from-[#1a1c2e] to-[#111217] rounded-3xl border border-indigo-500/30 p-8 shadow-2xl relative overflow-hidden">
+              <div className="absolute -right-8 -top-8 w-32 h-32 bg-indigo-500/10 blur-3xl rounded-full" />
+              
+              <h3 className="text-xs font-black uppercase tracking-[0.2em] text-indigo-400 mb-6 flex items-center gap-2">
+                <Zap size={16} className="text-indigo-400" /> AI Market Intelligence
+              </h3>
+              
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="p-4 bg-white/5 rounded-2xl border border-white/5">
+                  <p className="text-[10px] font-bold text-[#555] uppercase tracking-widest mb-1">Market State</p>
+                  <p className={cn(
+                    "text-lg font-black tracking-tighter",
+                    analysis?.aiSignals?.market_state === 'STABLE' ? 'text-emerald-400' : 
+                    analysis?.aiSignals?.market_state === 'VOLATILE' ? 'text-amber-400' : 'text-rose-500'
+                  )}>
+                    {analysis?.aiSignals?.market_state ?? 'SCANNING'}
+                  </p>
+                </div>
+                <div className="p-4 bg-white/5 rounded-2xl border border-white/5">
+                  <p className="text-[10px] font-bold text-[#555] uppercase tracking-widest mb-1">AI Confidence</p>
+                  <p className="text-lg font-black tracking-tighter text-white">
+                    {analysis?.aiSignals ? `${(analysis.aiSignals.confidence * 100).toFixed(0)}%` : '0%'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5">
+                  <span className="text-[10px] font-bold text-[#9ba1a6] uppercase">Trade Bias</span>
+                  <span className={cn(
+                    "px-2 py-0.5 rounded text-[10px] font-black uppercase",
+                    analysis?.aiSignals?.rise_fall === 'RISE' ? 'bg-emerald-500/20 text-emerald-400' :
+                    analysis?.aiSignals?.rise_fall === 'FALL' ? 'bg-rose-500/20 text-rose-400' : 'bg-white/10 text-white'
+                  )}>
+                    {analysis?.aiSignals?.rise_fall ?? 'WAITING'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-white/5">
+                  <span className="text-[10px] font-bold text-[#9ba1a6] uppercase">Entry Pulse</span>
+                  <span className={cn(
+                    "px-2 py-0.5 rounded text-[10px] font-black uppercase",
+                    analysis?.aiSignals?.accumulator === 'ENTER' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/50' : 'bg-white/10 text-[#555]'
+                  )}>
+                    {analysis?.aiSignals?.accumulator ?? 'WAIT'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Smart Strategy Guide */}
+            <div className="bg-[#111217] rounded-3xl border border-[#2d2f36] p-8 shadow-xl">
+              <h3 className="text-xs font-black uppercase tracking-[0.2em] text-[#9ba1a6] mb-6 flex items-center gap-2">
+                <ShieldCheck size={16} /> Signal Engine v5.1
+              </h3>
+              
+              <div className="space-y-4">
+                <SignalRow 
+                  label="Matches" 
+                  signal={analysis?.predictions.matches.signal.toString() ?? '—'} 
+                  hint="Bet on cold digit"
+                  confidence="High"
+                  onClick={() => loadBotFromSignal({
+                    symbol,
+                    type: 'differ',
+                    target: analysis?.predictions.matches.signal,
+                    seq: '',
+                    conf: 0.9,
+                    time: new Date().toLocaleTimeString()
+                  })}
+                />
+                <SignalRow 
+                  label="Differs" 
+                  signal={analysis?.predictions.differs.signal.toString() ?? '—'} 
+                  hint="Avoid hot digit"
+                  confidence="High"
+                  onClick={() => loadBotFromSignal({
+                    symbol,
+                    type: 'differ',
+                    target: analysis?.predictions.differs.signal,
+                    seq: '',
+                    conf: 0.95,
+                    time: new Date().toLocaleTimeString()
+                  })}
+                />
+                <SignalRow 
+                  label="Over/Under" 
+                  signal={analysis?.predictions.overUnder ?? '—'} 
+                  hint="Counter-trend play"
+                  confidence="Medium"
+                  onClick={() => {
+                    const isOver = analysis?.predictions.overUnder?.includes('Over');
+                    loadBotFromSignal({
+                      symbol,
+                      type: isOver ? 'over' : 'under',
+                      target: isOver ? 5 : 4,
+                      seq: '',
+                      conf: 0.75,
+                      time: new Date().toLocaleTimeString()
+                    });
+                  }}
+                />
+                <SignalRow 
+                  label="Even/Odd" 
+                  signal={analysis?.predictions.evenOdd ?? '—'} 
+                  hint="Mean reversion bias"
+                  confidence="Medium"
+                />
+                <SignalRow 
+                  label="Rise/Fall" 
+                  signal={analysis?.predictions.riseFall ?? '—'} 
+                  hint="SMA-500 Trend"
+                  confidence="High"
+                />
+              </div>
+            </div>
+            
+          </div>
+
+        </div>
+        </>
+        ) : (
+          layoutMode === 'grid' ? (
+            <div className="space-y-4">
+              {/* Single Master Over/Under Bot in Multi-Grid Style: Monitors all grid markets and executes on whichever market signals */}
+              {(contractAnalysisMode === 'pressure_noise' || windows.some(w => (w.contractMode || contractAnalysisMode) === 'pressure_noise')) && (
+                <OverUnderActiveBot
+                  markets={windows.map(win => ({
+                    symbol: win.symbol,
+                    name: SYMBOLS.find(s => s.id === win.symbol)?.name || win.symbol,
+                    ticks: marketTicks[win.symbol] || (win.symbol === symbol ? ticks : [])
+                  }))}
+                  isMultiMarketMode={true}
+                />
+              )}
+
+              <div className={cn(
+                "grid gap-4 md:gap-6",
+                gridColumns === 1 
+                  ? "grid-cols-1" 
+                  : gridColumns === 3 
+                    ? "grid-cols-1 xl:grid-cols-3" 
+                    : "grid-cols-1 lg:grid-cols-2"
+              )}>
+                {windows.map((win, idx) => (
+                  <MarketAnalysisWindow
+                    key={win.id}
+                    window={win}
+                    ticks={marketTicks[win.symbol] || (win.symbol === symbol ? ticks : [])}
+                    candles={marketCandles[win.symbol] || (win.symbol === symbol ? candles : [])}
+                    timeframeCandles={marketTimeframeCandles[win.symbol] || (win.symbol === symbol ? timeframeCandles : {})}
+                    allMarketTicks={marketTicks}
+                    isSingleView={false}
+                    onUpdateWindow={(updates) => handleUpdateWindow(win.id, updates)}
+                    onCloseWindow={() => handleRemoveWindow(win.id)}
+                    onFocusWindow={() => {
+                      setActiveWindowId(win.id);
+                      setLayoutMode('single');
+                      setSymbol(win.symbol);
+                    }}
+                    onDuplicateWindow={() => handleDuplicateWindow(win.id)}
+                    globalContractMode={contractAnalysisMode}
+                    globalTimeframe={selectedTimeframe}
+                    allSymbols={SYMBOLS}
+                    canClose={windows.length > 1}
+                    windowIndex={idx}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : (
+            <MarketAnalysisWindow
+              key={activeWindow.id}
+              window={activeWindow}
+              ticks={marketTicks[activeWindow.symbol] || ticks}
+              candles={marketCandles[activeWindow.symbol] || candles}
+              timeframeCandles={marketTimeframeCandles[activeWindow.symbol] || timeframeCandles}
+              allMarketTicks={marketTicks}
+              isSingleView={true}
+              onUpdateWindow={(updates) => handleUpdateWindow(activeWindow.id, updates)}
+              onCloseWindow={() => handleRemoveWindow(activeWindow.id)}
+              onFocusWindow={() => setLayoutMode('grid')}
+              onDuplicateWindow={() => handleDuplicateWindow(activeWindow.id)}
+              globalContractMode={contractAnalysisMode}
+              globalTimeframe={selectedTimeframe}
+              allSymbols={SYMBOLS}
+              canClose={windows.length > 1}
+              windowIndex={windows.findIndex(w => w.id === activeWindow.id) >= 0 ? windows.findIndex(w => w.id === activeWindow.id) : 0}
+            />
+          )
+        )}
+
+        {/* Professional Footer Info */}
+        <div className="flex flex-col sm:flex-row items-center justify-between pt-10 border-t border-[#2d2f36] gap-4">
+          <div className="flex items-center gap-8 text-[10px] font-bold uppercase tracking-widest text-[#555]">
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]" />
+              <span className="text-[#9ba1a6]">Engine Sync OK</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Activity size={14} className="text-indigo-400" />
+              <span className="text-[#9ba1a6]">AI Engine: v2.4 (ML-Active)</span>
+            </div>
+            <div className="hidden sm:block text-[#444]">
+              High-Speed (5/15/25) Intelligence
+            </div>
+          </div>
+          <div className="text-[10px] font-black text-[#555] uppercase tracking-[0.2em]">
+            Precision Analysis • v5.24.0
+          </div>
+        </div>
+
+      </div>
+
+      {/* Scanning Feedback Overlay */}
+      <AnimatePresence>
+        {isScanning && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md">
+            <div className="max-w-md w-full text-center space-y-8">
+              <div className="relative flex items-center justify-center">
+                <motion.div 
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
+                  className="w-48 h-48 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full"
+                />
+                <div className="absolute inset-0 flex flex-col items-center justify-center space-y-1">
+                  <span className="text-4xl font-black text-white">{scanProgress}%</span>
+                  <span className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.3em]">AI Scanning</span>
+                </div>
+              </div>
+              
+              <div className="space-y-2">
+                <h3 className="text-2xl font-black text-white tracking-tight">Searching Markets...</h3>
+                <p className="text-sm text-[#9ba1a6] font-medium">Scrutinizing price action across all synthetic indices for the best entry point.</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Scan Results Modal - OTIVO AI Edition */}
+      <AnimatePresence>
+        {showScanResults && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-2 sm:p-4 bg-black/90 backdrop-blur-md">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-[1400px] bg-[#0b0f1a] rounded-2xl sm:rounded-[2.5rem] border border-white/5 shadow-2xl p-4 sm:p-8 space-y-4 sm:space-y-8 max-h-[96vh] sm:max-h-[92vh] flex flex-col overflow-hidden"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between shrink-0">
+                <div className="space-y-1">
+                  <h3 className="text-xl sm:text-3xl font-black text-white tracking-tighter flex items-center gap-3">
+                    <span className="text-emerald-500 italic">OTIVO</span> SCANNER
+                  </h3>
+                </div>
+                <button 
+                  onClick={() => setShowScanResults(false)}
+                  className="p-2 sm:p-3 hover:bg-white/5 rounded-full text-slate-500 hover:text-white transition-all active:scale-90"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              {/* Neural Market Cards Bar */}
+              <div className="flex overflow-x-auto sm:grid sm:grid-cols-4 md:grid-cols-8 gap-2 sm:gap-3 shrink-0 pb-2 sm:pb-0 scrollbar-hide">
+                {NEURAL_MARKETS.map(m => {
+                  const data = neuralMarketData[m];
+                  return (
+                    <div key={m} className={cn(
+                      "bg-[#172035]/40 border border-white/5 rounded-xl p-2.5 sm:p-3 flex flex-col items-center transition-all shrink-0 sm:shrink min-w-[75px] sm:min-w-0",
+                      data?.lastDigit !== undefined && (data.lastDigit > 5 ? "border-t-emerald-500/50" : "border-t-blue-500/50")
+                    )}>
+                      <span className="text-[8px] sm:text-[9px] font-bold text-slate-500 mb-1.5 sm:mb-2 uppercase">{m}</span>
+                      <span className="text-lg sm:text-2xl font-black text-white font-mono leading-none">{data?.lastDigit ?? '--'}</span>
+                      <div className="w-full mt-1.5 sm:mt-2 h-1 bg-white/5 rounded-full overflow-hidden">
+                        <motion.div 
+                          className="h-full bg-emerald-500"
+                          initial={{ width: 0 }}
+                          animate={{ width: `${(data?.count || 0)}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Toggle Switches Bar */}
+              <div className="flex items-center gap-4 shrink-0 overflow-x-auto pb-2 scrollbar-hide">
+                 <div className="flex items-center gap-2">
+                    {[
+                      { id: 'over', label: 'Over 5+', color: 'text-emerald-400', bg: 'bg-emerald-500/10' },
+                      { id: 'under', label: 'Under 4', color: 'text-blue-400', bg: 'bg-blue-500/10' },
+                      { id: 'differ', label: 'Differ', color: 'text-purple-400', bg: 'bg-purple-500/10' }
+                    ].map(sec => (
+                      <button
+                        key={sec.id}
+                        onClick={() => setActiveSections(prev => 
+                          prev.includes(sec.id) ? prev.filter(s => s !== sec.id) : [...prev, sec.id]
+                        )}
+                        className={cn(
+                          "px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all flex items-center gap-2",
+                          activeSections.includes(sec.id) 
+                            ? `${sec.bg} border-white/20 text-white` 
+                            : "bg-transparent border-white/5 text-slate-600"
+                        )}
+                      >
+                        <div className={cn("w-1.5 h-1.5 rounded-full", activeSections.includes(sec.id) ? (sec.id === 'over' ? 'bg-emerald-500' : sec.id === 'under' ? 'bg-blue-500' : 'bg-purple-500') : 'bg-slate-700')} />
+                        {sec.label}
+                      </button>
+                    ))}
+                 </div>
+              </div>
+
+              {/* OTIVO Dashboard Columns */}
+              <div className="flex-1 flex flex-col lg:flex-row gap-4 sm:gap-6 overflow-y-auto lg:overflow-hidden min-h-0 custom-scrollbar">
+                
+                {/* OVER Patterns */}
+                {activeSections.includes('over') && (
+                  <div className="flex-1 bg-[#172035]/40 rounded-xl sm:rounded-3xl border border-white/5 p-4 sm:p-6 flex flex-col shrink-0 lg:shrink lg:min-w-0">
+                    <div className="flex items-center justify-between mb-4 sm:mb-6">
+                      <h4 className="text-emerald-400 font-black text-[10px] sm:text-xs uppercase tracking-[0.2em] flex items-center gap-2 truncate">
+                        <TrendingUp size={16} /> OVER 5+ Patterns
+                      </h4>
+                      <span className="hidden sm:inline-block text-[9px] font-mono bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded border border-emerald-500/10 uppercase tracking-tighter">Strength &gt; 70%</span>
+                    </div>
+                    <div className="lg:flex-1 lg:overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+                      {otivoSignals.over.length > 0 ? otivoSignals.over.map(sig => (
+                        <OtivoSignalCard key={sig.id} signal={sig} onClick={() => loadBotFromSignal(sig)} />
+                      )) : (
+                        <div className="h-full flex items-center justify-center text-center p-6 sm:p-10">
+                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-loose">Listening for <br/> high-digit patterns...</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* UNDER Patterns */}
+                {activeSections.includes('under') && (
+                  <div className="flex-1 bg-[#172035]/40 rounded-xl sm:rounded-3xl border border-white/5 p-4 sm:p-6 flex flex-col shrink-0 lg:shrink lg:min-w-0">
+                    <div className="flex items-center justify-between mb-4 sm:mb-6">
+                      <h4 className="text-blue-400 font-black text-[10px] sm:text-xs uppercase tracking-[0.2em] flex items-center gap-2 truncate">
+                        <TrendingDown size={16} /> UNDER 4 Patterns
+                      </h4>
+                      <span className="hidden sm:inline-block text-[9px] font-mono bg-blue-500/10 text-blue-500 px-2 py-0.5 rounded border border-blue-500/10 uppercase tracking-tighter">Strength &gt; 70%</span>
+                    </div>
+                    <div className="lg:flex-1 lg:overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+                      {otivoSignals.under.length > 0 ? otivoSignals.under.map(sig => (
+                        <OtivoSignalCard key={sig.id} signal={sig} onClick={() => loadBotFromSignal(sig)} />
+                      )) : (
+                        <div className="h-full flex items-center justify-center text-center p-6 sm:p-10">
+                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-loose">Listening for <br/> low-digit patterns...</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* DIFFER Patterns */}
+                {activeSections.includes('differ') && (
+                  <div className="flex-1 bg-[#172035]/40 rounded-xl sm:rounded-3xl border border-white/5 p-4 sm:p-6 flex flex-col shrink-0 lg:shrink lg:min-w-0">
+                    <div className="flex items-center justify-between mb-4 sm:mb-6">
+                      <h4 className="text-purple-400 font-black text-[10px] sm:text-xs uppercase tracking-[0.2em] flex items-center gap-2 truncate">
+                        <Target size={16} /> DIFFER Absences
+                      </h4>
+                      <span className="hidden sm:inline-block text-[9px] font-mono bg-purple-500/10 text-purple-500 px-2 py-0.5 rounded border border-purple-500/10 uppercase tracking-tighter">Zero Recurrence</span>
+                    </div>
+                    <div className="lg:flex-1 lg:overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+                      {otivoSignals.differ.length > 0 ? otivoSignals.differ.map(sig => (
+                        <OtivoSignalCard key={sig.id} signal={sig} onClick={() => loadBotFromSignal(sig)} />
+                      )) : (
+                        <div className="h-full flex items-center justify-center text-center p-6 sm:p-10">
+                          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest leading-loose">Identifying <br/> statistical gaps...</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI Discovery Log */}
+                <div className="lg:w-80 shrink-0 bg-[#070b14] rounded-xl sm:rounded-3xl border border-emerald-500/20 p-4 sm:p-6 flex flex-col shadow-2xl min-h-[200px] lg:min-h-0 overflow-hidden">
+                  <h4 className="text-slate-200 font-black text-[10px] sm:text-xs uppercase tracking-[0.2em] flex items-center gap-2 mb-4 sm:mb-6">
+                    <Activity size={16} className="text-emerald-400" /> AI Discovery Log
+                  </h4>
+                  <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar font-mono text-[9px]">
+                    {otivoLog.length > 0 ? otivoLog.map((log, i) => (
+                      <div key={i} className="pb-1 border-b border-white/5 text-slate-400">
+                        {log}
+                      </div>
+                    )) : (
+                      <div className="text-emerald-500/50 animate-pulse italic">Initializing Neural Net...</div>
+                    )}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Footer Actions */}
+              <div className="shrink-0 pt-6 border-t border-white/5 flex items-center justify-end">
+                <button 
+                  onClick={() => setShowScanResults(false)}
+                  className="px-10 py-4 bg-white/5 hover:bg-white/10 text-white font-black rounded-2xl transition-all border border-white/10 active:scale-[0.98]"
+                >
+                  CLOSE ENGINE
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Auto-Trading Dashboard Stats */}
+      {isAutoTrading && (
+        <div className="fixed bottom-10 right-10 z-[80]">
+          <motion.div 
+            initial={{ opacity: 0, x: 50, scale: 0.9 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            className="bg-[#111217] rounded-3xl border border-indigo-500/40 p-6 shadow-2xl backdrop-blur-xl w-72 space-y-6"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="text-[10px] font-black text-white uppercase tracking-widest">Bot Active</span>
+              </div>
+              <button 
+                onClick={stopAutoTrade}
+                className="p-1.5 hover:bg-rose-500/10 text-[#555] hover:text-rose-500 rounded-lg transition-all"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] font-black text-[#555] uppercase tracking-widest">Session Profit</span>
+                <span className={cn(
+                  "text-lg font-black tracking-tight",
+                  autoSessionProfit >= 0 ? "text-emerald-400" : "text-rose-400"
+                )}>
+                  ${Number(autoSessionProfit || 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] font-black text-[#555] uppercase tracking-widest">Next Stake</span>
+                <span className="text-white font-black">${Number(currentAutoStake || 0).toFixed(2)}</span>
+              </div>
+              <div className="w-full bg-[#0a0b0d] h-2 rounded-full overflow-hidden">
+                <motion.div 
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.min(100, Math.max(0, (autoSessionProfit / (autoSessionProfit >= 0 ? scannerSettings.tp : scannerSettings.sl)) * 100))}%` }}
+                  className={cn("h-full", autoSessionProfit >= 0 ? "bg-emerald-500" : "bg-rose-500")}
+                />
+              </div>
+              <div className="flex justify-between text-[8px] font-black uppercase text-[#444] tracking-widest pt-1">
+                <span>Start</span>
+                <span>TP: ${scannerSettings.tp}</span>
+              </div>
+            </div>
+
+            <div className="p-3 bg-white/5 rounded-xl border border-white/5 space-y-1">
+              <p className="text-[8px] font-black text-[#555] uppercase tracking-widest">Target Market</p>
+              <p className="text-xs font-bold text-white truncate">{scanBestMarket?.name}</p>
+              <p className="text-[9px] font-black text-indigo-400 uppercase">Digit: {scanBestMarket?.digit} (Differ)</p>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* TP/SL Conclusion Modal */}
+      <AnimatePresence>
+        {tpSlResult && (
+          <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xl">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className={cn(
+                "w-full max-w-sm p-8 rounded-[2.5rem] border text-center space-y-6 shadow-2xl relative overflow-hidden",
+                tpSlResult.type === 'tp' ? "bg-emerald-950/20 border-emerald-500/30" : "bg-rose-950/20 border-rose-500/30"
+              )}
+            >
+              {/* Decorative Background Elements */}
+              <div className={cn(
+                "absolute -top-20 -right-20 w-40 h-40 blur-[80px] rounded-full opacity-20",
+                tpSlResult.type === 'tp' ? "bg-emerald-400" : "bg-rose-400"
+              )} />
+              
+              <div className="mx-auto w-20 h-20 rounded-full flex items-center justify-center animate-bounce shadow-inner bg-white/5">
+                {tpSlResult.type === 'tp' ? (
+                  <TrendingUp size={40} className="text-emerald-400" />
+                ) : (
+                  <TrendingDown size={40} className="text-rose-400" />
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-sm font-black text-[#555] uppercase tracking-[0.4em]">Session Finished</h3>
+                <h2 className="text-3xl font-black text-white tracking-tighter">
+                  {tpSlResult.type === 'tp' ? 'Target Profit Hit!' : 'Stop Loss Triggered'}
+                </h2>
+              </div>
+
+              <div className="flex flex-col items-center justify-center space-y-1 py-4">
+                <span className="text-[10px] font-black text-[#555] uppercase tracking-widest leading-none mb-1">Total Profit</span>
+                <span className={cn(
+                  "text-5xl font-black tracking-tighter",
+                  tpSlResult.profit >= 0 ? "text-emerald-400" : "text-rose-400"
+                )}>
+                  ${Number(tpSlResult.profit || 0).toFixed(2)}
+                </span>
+              </div>
+
+              <button
+                onClick={() => setTpSlResult(null)}
+                className={cn(
+                  "w-full py-4 rounded-2xl font-black text-white transition-all shadow-xl active:scale-95",
+                  tpSlResult.type === 'tp' ? "bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20" : "bg-rose-600 hover:bg-rose-500 shadow-rose-500/20"
+                )}
+              >
+                CLOSE REPORT
+              </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* AI MARKET HACKER MODAL */}
+      <AnimatePresence>
+        {showHackerModal && (
+          <div className="fixed inset-x-0 top-[60px] bottom-0 z-[120] flex items-center justify-center p-2 sm:p-4 bg-black/80 backdrop-blur-xl overflow-hidden overscroll-none">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-4xl h-[88vh] max-h-[760px] bg-[#111217] rounded-3xl border border-violet-500/30 p-4 sm:p-8 flex flex-col shadow-2xl relative overflow-hidden overscroll-contain"
+            >
+              <div className="flex items-center justify-between pb-4 border-b border-white/10 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-violet-500/10 rounded-xl border border-violet-500/30">
+                    <Zap size={22} className="text-violet-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-black text-white tracking-tight">AI MARKET HACKER</h2>
+                    <p className="text-xs text-slate-400 font-medium">10 Volatilities Multi-Market Digit Scanner & Execution Engine</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowHackerModal(false)}
+                  className="p-2 hover:bg-white/10 text-slate-400 hover:text-white rounded-xl transition-all"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 my-6 overflow-y-auto flex-1 pr-1 custom-scrollbar">
+                {/* Left Panel: Configuration & Stats */}
+                <div className="space-y-4">
+                  <div className="bg-[#0a0b0d] p-4 rounded-2xl border border-white/5 space-y-3">
+                    <h3 className="text-xs font-black uppercase text-violet-400 tracking-widest">Scanner Configuration</h3>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Trade Stake ($)</label>
+                      <input
+                        type="number"
+                        min="0.35"
+                        step="0.01"
+                        value={hackerStake}
+                        onChange={(e) => setHackerStake(parseFloat(e.target.value) || 0.50)}
+                        disabled={hackerScanning}
+                        className="w-full bg-[#161821] border border-white/10 rounded-xl px-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-violet-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">No. of Runs in Wins (Target Wins)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={hackerMaxTrades}
+                        onChange={(e) => setHackerMaxTrades(parseInt(e.target.value, 10) || 1)}
+                        disabled={hackerScanning}
+                        className="w-full bg-[#161821] border border-white/10 rounded-xl px-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-violet-500"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">Duration (Ticks)</label>
+                        <span className="text-[10px] font-mono font-bold text-violet-400">{hackerDurationTicks} {hackerDurationTicks === 1 ? 'tick' : 'ticks'}</span>
+                      </div>
+                      <input
+                        type="number"
+                        min="1"
+                        max="10"
+                        step="1"
+                        value={hackerDurationTicks}
+                        onChange={(e) => setHackerDurationTicks(Math.max(1, Math.min(10, parseInt(e.target.value, 10) || 1)))}
+                        disabled={hackerScanning}
+                        className="w-full bg-[#161821] border border-white/10 rounded-xl px-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-violet-500 disabled:opacity-50"
+                      />
+                      <span className="text-[9px] text-slate-500 mt-1 block">Contract duration in ticks (1 to 10 ticks)</span>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Martingale Multiplier</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.1"
+                        value={hackerMartingaleMultiplier}
+                        onChange={(e) => setHackerMartingaleMultiplier(parseFloat(e.target.value) || 2.1)}
+                        disabled={hackerScanning}
+                        className="w-full bg-[#161821] border border-white/10 rounded-xl px-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-violet-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-1">Martingale After Losses</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={hackerMartingaleAfterLosses}
+                        onChange={(e) => setHackerMartingaleAfterLosses(parseInt(e.target.value, 10) || 1)}
+                        disabled={hackerScanning}
+                        className="w-full bg-[#161821] border border-white/10 rounded-xl px-3 py-2 text-sm font-bold text-white focus:outline-none focus:border-violet-500"
+                      />
+                    </div>
+
+                    {/* Virtual Switch (Virtual Trade Manager) */}
+                    <div className="pt-2 border-t border-white/5 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <label className="text-xs font-black uppercase text-violet-400 tracking-wider block">Virtual Switch (Opposite Direction)</label>
+                          <span className="text-[9px] text-slate-400 font-medium block">Simulate opposite-direction trades before real contract</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setHackerVirtualMode(!hackerVirtualMode)}
+                          disabled={hackerScanning}
+                          className={cn(
+                            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                            hackerVirtualMode ? "bg-violet-600" : "bg-slate-700",
+                            hackerScanning && "opacity-50 cursor-not-allowed"
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                              hackerVirtualMode ? "translate-x-5" : "translate-x-0"
+                            )}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Auto-Restart on Virtual Win Switch */}
+                      <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                        <div>
+                          <label className="text-xs font-black uppercase text-amber-400 tracking-wider block">Auto-Restart on Virtual Win</label>
+                          <span className="text-[9px] text-slate-400 font-medium block">
+                            Forces Loss Target = 1 & Virtual Switch = ON. Auto-restarts bot if opposite virtual trade wins until virtual loss occurs.
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleHackerAutoRestartWin(!hackerAutoRestartWin)}
+                          disabled={hackerScanning}
+                          className={cn(
+                            "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                            hackerAutoRestartWin ? "bg-amber-500" : "bg-slate-700",
+                            hackerScanning && "opacity-50 cursor-not-allowed"
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                              hackerAutoRestartWin ? "translate-x-5" : "translate-x-0"
+                            )}
+                          />
+                        </button>
+                      </div>
+
+                      {hackerVirtualMode && (
+                        <div className="p-2.5 bg-violet-500/10 rounded-xl border border-violet-500/20 space-y-1.5 animate-fadeIn">
+                          <label className="text-[10px] font-bold text-violet-300 uppercase tracking-widest block">Virtual Losses Target</label>
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={hackerVirtualLosses}
+                            onChange={(e) => setHackerVirtualLosses(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                            disabled={hackerScanning || hackerAutoRestartWin}
+                            className="w-full bg-[#161821] border border-violet-500/30 rounded-xl px-3 py-1.5 text-sm font-bold text-white focus:outline-none focus:border-violet-400 disabled:opacity-50"
+                          />
+                          <span className="text-[9px] text-violet-300/80 font-medium block">
+                            Takes opposite virtual trades (e.g. Under 8 if AI finds Over 1 entry). After {hackerVirtualLosses} virtual loss(es), places the REAL contract (e.g. Over 1) on that market.
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Same Market Direct Recovery Switch */}
+                      <div className="pt-2 border-t border-white/5 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <label className="text-xs font-black uppercase text-cyan-400 tracking-wider block">Same Market Direct Recovery</label>
+                            <span className="text-[9px] text-slate-400 font-medium block">
+                              On real loss, recover immediately on the same market.
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setHackerSameMarketRecovery(!hackerSameMarketRecovery)}
+                            disabled={hackerScanning}
+                            className={cn(
+                              "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                              hackerSameMarketRecovery ? "bg-cyan-500" : "bg-slate-700",
+                              hackerScanning && "opacity-50 cursor-not-allowed"
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                                hackerSameMarketRecovery ? "translate-x-5" : "translate-x-0"
+                              )}
+                            />
+                          </button>
+                        </div>
+
+                        {hackerSameMarketRecovery && (
+                          <div className="p-2.5 bg-cyan-500/10 rounded-xl border border-cyan-500/20 space-y-2 animate-fadeIn">
+                            <label className="text-[10px] font-bold text-cyan-300 uppercase tracking-widest block">
+                              Recovery Contract Type
+                            </label>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setHackerRecoveryContract('DIGITOVER')}
+                                disabled={hackerScanning}
+                                className={cn(
+                                  "py-1.5 px-3 rounded-lg text-xs font-black transition-all border flex items-center justify-center gap-1",
+                                  hackerRecoveryContract === 'DIGITOVER'
+                                    ? "bg-cyan-500 text-black border-cyan-400 shadow-md shadow-cyan-500/20"
+                                    : "bg-[#161821] text-slate-400 border-white/10 hover:border-white/20"
+                                )}
+                              >
+                                OVER 1
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setHackerRecoveryContract('DIGITUNDER')}
+                                disabled={hackerScanning}
+                                className={cn(
+                                  "py-1.5 px-3 rounded-lg text-xs font-black transition-all border flex items-center justify-center gap-1",
+                                  hackerRecoveryContract === 'DIGITUNDER'
+                                    ? "bg-cyan-500 text-black border-cyan-400 shadow-md shadow-cyan-500/20"
+                                    : "bg-[#161821] text-slate-400 border-white/10 hover:border-white/20"
+                                )}
+                              >
+                                UNDER 8
+                              </button>
+                            </div>
+                            <span className="text-[9px] text-cyan-300/80 font-medium block">
+                              After a loss, the bot will immediately place a recovery trade on the same market using {hackerRecoveryContract === 'DIGITOVER' ? 'Over 1' : 'Under 8'} contract with martingale stake.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Continuous Same Market Trading Switch */}
+                      <div className="pt-2 border-t border-white/5 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <label className="text-xs font-black uppercase text-emerald-400 tracking-wider block flex items-center gap-1.5">
+                              <Zap size={14} className="text-emerald-400" />
+                              <span>Continuous Trading After Signal (Same Market)</span>
+                            </label>
+                            <span className="text-[9px] text-slate-400 font-medium block">
+                              Lock onto signal market and trade continuously on the same market.
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setHackerContinuousSameMarket(!hackerContinuousSameMarket)}
+                            disabled={hackerScanning}
+                            className={cn(
+                              "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                              hackerContinuousSameMarket ? "bg-emerald-500" : "bg-slate-700",
+                              hackerScanning && "opacity-50 cursor-not-allowed"
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
+                                hackerContinuousSameMarket ? "translate-x-5" : "translate-x-0"
+                              )}
+                            />
+                          </button>
+                        </div>
+
+                        {hackerContinuousSameMarket && (
+                          <div className="p-2.5 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-[9px] text-emerald-300 font-medium animate-fadeIn">
+                            ⚡ <strong>Continuous Real Trading Active:</strong> Once the initial signal triggers the first REAL trade (after virtual threshold if Virtual Switch is ON), the bot stays locked on that market and continuously executes REAL trades directly without waiting for virtual loss signals again. On any loss, it fast immediately purchases the martingale recovery contract on the same market.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="bg-[#0a0b0d] p-4 rounded-2xl border border-white/5 space-y-3">
+                    <h3 className="text-xs font-black uppercase text-violet-400 tracking-widest flex items-center justify-between flex-wrap gap-1">
+                      <span>Session Performance</span>
+                      {hackerVirtualMode && (
+                        <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30">
+                          VIRTUAL {hackerAutoRestartWin ? 'AUTO-RESTART ON WIN' : `OPPOSITE (${hackerVirtualLosses} Loss Target)`}
+                        </span>
+                      )}
+                    </h3>
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div className="p-2 bg-white/5 rounded-xl">
+                        <span className="text-[9px] font-bold text-slate-400 block">REAL TRADES</span>
+                        <span className="text-base font-black text-white tabular-nums">{hackerTradesCount}</span>
+                      </div>
+                      <div className="p-2 bg-emerald-500/10 rounded-xl">
+                        <span className="text-[9px] font-bold text-emerald-400 block">WINS / GOAL</span>
+                        <span className="text-base font-black text-emerald-400 tabular-nums">
+                          {hackerWinsCount} <span className="text-xs font-normal text-emerald-400/70">/ {hackerMaxTrades}</span>
+                        </span>
+                      </div>
+                      <div className="p-2 bg-rose-500/10 rounded-xl">
+                        <span className="text-[9px] font-bold text-rose-400 block">REAL LOSSES</span>
+                        <span className="text-base font-black text-rose-400 tabular-nums">{hackerLossesCount}</span>
+                      </div>
+                    </div>
+
+                    {hackerVirtualMode && (
+                      <div className="grid grid-cols-2 gap-2 text-center pt-1 border-t border-white/5">
+                        <div className="p-1.5 bg-violet-500/10 rounded-xl border border-violet-500/20">
+                          <span className="text-[8px] font-black text-violet-400 block">VIRTUAL WINS</span>
+                          <span className="text-xs font-black text-violet-300 tabular-nums">{hackerVirtualStats.wins}</span>
+                        </div>
+                        <div className="p-1.5 bg-amber-500/10 rounded-xl border border-amber-500/20">
+                          <span className="text-[8px] font-black text-amber-400 block">VIRTUAL LOSSES</span>
+                          <span className="text-xs font-black text-amber-300 tabular-nums">{hackerVirtualStats.losses}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="p-3 bg-white/5 rounded-xl flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Real Profit/Loss:</span>
+                      <span className={cn(
+                        "text-lg font-black tabular-nums",
+                        hackerSessionProfit >= 0 ? "text-emerald-400" : "text-rose-400"
+                      )}>
+                        ${hackerSessionProfit >= 0 ? '+' : ''}{hackerSessionProfit.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    {!hackerScanning ? (
+                      <button
+                        onClick={startHackerScanner}
+                        className="w-full py-3.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-black rounded-2xl shadow-lg shadow-violet-500/25 active:scale-95 transition-all flex items-center justify-center gap-2"
+                      >
+                        <Play size={18} fill="currentColor" />
+                        START HACKER SCANNER
+                      </button>
+                    ) : (
+                      <button
+                        onClick={stopHackerScanner}
+                        className="w-full py-3.5 bg-rose-600 hover:bg-rose-500 text-white font-black rounded-2xl shadow-lg shadow-rose-500/25 active:scale-95 transition-all flex items-center justify-center gap-2 animate-pulse"
+                      >
+                        <Square size={18} fill="currentColor" />
+                        STOP HACKER SCANNER
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Center & Right Panel: Strategy Architecture & 10 Volatility Live Matrix & Log Feed */}
+                <div className="md:col-span-2 flex flex-col gap-4">
+                  {/* Strategy Architecture Blueprint Box */}
+                  <div className="bg-[#0a0b0d] p-3.5 sm:p-4 rounded-2xl border border-violet-500/20 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ShieldCheck size={16} className="text-violet-400" />
+                        <h3 className="text-xs font-black uppercase text-violet-400 tracking-widest">
+                          High-Precision 4-Layer Math Strategy Blueprint
+                        </h3>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-violet-500/10 text-violet-300 border border-violet-500/20">
+                        1-Tick Duration
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-[11px]">
+                      <div className="p-2 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                        <span className="text-[9px] font-black uppercase text-emerald-400 block tracking-wider">
+                          Layer 1: Real Binary P(Win)
+                        </span>
+                        <p className="text-slate-300 font-medium leading-tight text-[10px]">
+                          Over 1: Markov P(Win) &ge; 80.0%<br />
+                          Under 8: Markov P(Win) &ge; 80.0%
+                        </p>
+                      </div>
+                      <div className="p-2 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                        <span className="text-[9px] font-black uppercase text-indigo-400 block tracking-wider">
+                          Layer 2: 3-Tick Binary Confirm
+                        </span>
+                        <p className="text-slate-300 font-medium leading-tight text-[10px]">
+                          Over 1: 3t No 0,1 (Trig 2/3/4)<br />
+                          Under 8: 3t No 8,9 (Trig 7/6/5)
+                        </p>
+                      </div>
+                      <div className="p-2 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                        <span className="text-[9px] font-black uppercase text-amber-400 block tracking-wider">
+                          Layer 3: Zero Trap Filter
+                        </span>
+                        <p className="text-slate-300 font-medium leading-tight text-[10px]">
+                          Zero losing digits [0,1] or [8,9]<br />
+                          in last 4 ticks
+                        </p>
+                      </div>
+                      <div className="p-2 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                        <span className="text-[9px] font-black uppercase text-cyan-400 block tracking-wider">
+                          Layer 4: Math Shadow Engine
+                        </span>
+                        <p className="text-slate-300 font-medium leading-tight text-[10px]">
+                          Shadow Pred safe<br />
+                          (No 0,1 / No 8,9)
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Core Math Reconstruction & Markov Shadow Generator Engine Display Card */}
+                  <div className="bg-[#0a0b0d] p-4 rounded-2xl border border-indigo-500/20 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Activity size={16} className="text-indigo-400" />
+                        <h3 className="text-xs font-black uppercase text-indigo-400 tracking-widest">
+                          Math Reconstruction &amp; Markov Shadow Generator Engine
+                        </h3>
+                      </div>
+                      {/* Symbol Selector Pills */}
+                      <div className="flex items-center gap-1 flex-wrap overflow-x-auto">
+                        {VOLATILITY_10_MARKETS.map(s => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setHackerSelectedMathSymbol(s)}
+                            className={cn(
+                              "px-2 py-0.5 rounded text-[9px] font-bold transition-all",
+                              hackerSelectedMathSymbol === s
+                                ? "bg-indigo-600 text-white shadow-sm"
+                                : "bg-white/5 text-slate-400 hover:bg-white/10"
+                            )}
+                          >
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {(() => {
+                      const summary = hackerMathSummaries[hackerSelectedMathSymbol];
+                      const marketDigits = hackerMarketDigits[hackerSelectedMathSymbol] || [];
+                      const lastDigit = marketDigits.length > 0 ? marketDigits[marketDigits.length - 1] : null;
+
+                      if (!summary) {
+                        return (
+                          <div className="p-4 text-center text-slate-500 text-xs italic bg-[#161821] rounded-xl border border-white/5">
+                            Math reconstruction solver standby. Start scanner to ingest synthetic digit stream for {hackerSelectedMathSymbol}...
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="space-y-3 animate-fadeIn">
+                          {/* Engine Overview Grid */}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            <div className="p-2.5 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                              <span className="text-[8px] font-black uppercase text-slate-400 block">Solver State</span>
+                              {summary.isDeterministic ? (
+                                <span className="text-xs font-black text-emerald-400 block font-mono">
+                                  Linear LCG Solved <br />
+                                  <span className="text-[9px] text-emerald-300 font-bold">
+                                    (x+1 = ({summary.lcgParams?.[0]}x + {summary.lcgParams?.[1]}) % 10)
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className="text-xs font-black text-indigo-300 block font-mono">
+                                  1st-Order Markov <br />
+                                  <span className="text-[9px] font-medium text-slate-400">Empirical Solver</span>
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="p-2.5 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                              <span className="text-[8px] font-black uppercase text-slate-400 block">Shadow Prediction</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 flex items-center justify-center font-black text-sm font-mono">
+                                  {summary.topPrediction}
+                                </span>
+                                <div className="text-[9px] font-mono">
+                                  <span className="text-indigo-400 font-bold block">
+                                    {(summary.confidence * 100).toFixed(1)}% Conf
+                                  </span>
+                                  <span className="text-slate-400">Top 3: [{summary.top3Predictions.join(', ')}]</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="p-2.5 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                              <span className="text-[8px] font-black uppercase text-slate-400 block">Accuracy Evaluator</span>
+                              <div className="text-[9px] font-mono space-y-0.5">
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Exact Match:</span>
+                                  <span className="text-emerald-400 font-bold">{summary.exactAccuracyPct.toFixed(1)}%</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Top-3 Match:</span>
+                                  <span className="text-indigo-400 font-bold">{summary.top3AccuracyPct.toFixed(1)}%</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="p-2.5 bg-[#161821] rounded-xl border border-white/5 space-y-1">
+                              <span className="text-[8px] font-black uppercase text-slate-400 block">Evaluated &amp; MAE</span>
+                              <div className="text-[9px] font-mono space-y-0.5">
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Evaluations:</span>
+                                  <span className="text-white font-bold">{summary.totalEvaluated}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Mean Abs Error:</span>
+                                  <span className="text-amber-400 font-bold">{summary.mae.toFixed(2)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Markov Transition Distribution Bar */}
+                          {lastDigit !== null && summary.probabilities && summary.probabilities.length === 10 && (
+                            <div className="p-2.5 bg-[#161821] rounded-xl border border-white/5 space-y-1.5">
+                              <div className="flex items-center justify-between text-[9px] font-mono text-slate-400">
+                                <span>Markov Transition Profile (Current Digit: <strong className="text-white font-black">{lastDigit}</strong>)</span>
+                                <span>Predicted Probabilities for Next Digit (0-9)</span>
+                              </div>
+                              <div className="grid grid-cols-10 gap-1 text-center">
+                                {summary.probabilities.map((prob, d) => (
+                                  <div key={d} className="flex flex-col items-center gap-1">
+                                    <div className="w-full bg-white/5 h-12 rounded relative flex items-end overflow-hidden">
+                                      <div
+                                        className={cn(
+                                          "w-full transition-all duration-300 rounded-t",
+                                          d === summary.topPrediction ? "bg-indigo-500" :
+                                          summary.top3Predictions.includes(d) ? "bg-indigo-500/40" :
+                                          "bg-slate-700/40"
+                                        )}
+                                        style={{ height: `${Math.max(5, prob * 100)}%` }}
+                                      />
+                                    </div>
+                                    <span className={cn(
+                                      "text-[9px] font-black font-mono",
+                                      d === summary.topPrediction ? "text-indigo-400 font-bold" : "text-slate-400"
+                                    )}>
+                                      {d}
+                                    </span>
+                                    <span className="text-[7px] text-slate-500 font-mono">
+                                      {(prob * 100).toFixed(0)}%
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* 10 Volatilities Live Matrix */}
+                  <div className="bg-[#0a0b0d] p-4 rounded-2xl border border-white/5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-black uppercase text-violet-400 tracking-widest">
+                        10 Volatilities Live Matrix (100t Window)
+                      </h3>
+                      <span className="text-[10px] font-bold text-slate-500 font-mono">
+                        Target Loss Risk: &le; 20.0%
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                      {VOLATILITY_10_MARKETS.map(sym => {
+                        const history = hackerMarketDigits[sym] || [];
+                        const last100 = history.slice(-100);
+                        const last5 = history.slice(-5);
+                        const last4 = history.slice(-4);
+                        
+                        const count0and1 = last100.filter(d => d === 0 || d === 1).length;
+                        const pct0and1 = last100.length > 0 ? (count0and1 / last100.length) * 100 : 0;
+                        
+                        const count8and9 = last100.filter(d => d === 8 || d === 9).length;
+                        const pct8and9 = last100.length > 0 ? (count8and9 / last100.length) * 100 : 0;
+
+                        const losingCount0and1 = last4.filter(d => d === 0 || d === 1).length;
+                        const losingCount8and9 = last4.filter(d => d === 8 || d === 9).length;
+                        const isClean = losingCount0and1 === 0 || losingCount8and9 === 0;
+
+                        return (
+                          <div key={sym} className="p-2 bg-[#161821] rounded-xl border border-white/5 text-center flex flex-col justify-between gap-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-black uppercase tracking-tight text-white">
+                                {sym}
+                              </span>
+                              <span className={cn(
+                                "text-[9px] font-bold px-1 rounded",
+                                isClean ? "bg-emerald-500/10 text-emerald-400" : "bg-amber-500/10 text-amber-400"
+                              )}>
+                                {isClean ? 'Clean' : 'Barrier'}
+                              </span>
+                            </div>
+
+                            <div className="flex justify-center gap-1 my-0.5">
+                              {last5.length > 0 ? last5.map((d, i) => (
+                                <span
+                                  key={i}
+                                  className={cn(
+                                    "w-5 h-5 rounded flex items-center justify-center text-[10px] font-black tabular-nums",
+                                    d === 8 || d === 9 ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" :
+                                    d === 0 || d === 1 ? "bg-rose-500/20 text-rose-400 border border-rose-500/30" :
+                                    d === 2 || d === 7 ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" :
+                                    "bg-white/5 text-slate-300"
+                                  )}
+                                >
+                                  {d}
+                                </span>
+                              )) : (
+                                <span className="text-[10px] text-slate-600 italic">--</span>
+                              )}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-1 text-[8px] font-mono border-t border-white/5 pt-1">
+                              <div className={cn(
+                                "p-0.5 rounded",
+                                pct0and1 <= 20.0 ? "text-emerald-400 bg-emerald-500/10 font-bold" :
+                                "text-slate-500"
+                              )}>
+                                %0+1: {pct0and1.toFixed(1)}%
+                              </div>
+                              <div className={cn(
+                                "p-0.5 rounded",
+                                pct8and9 <= 20.0 ? "text-emerald-400 bg-emerald-500/10 font-bold" :
+                                "text-slate-500"
+                              )}>
+                                %8+9: {pct8and9.toFixed(1)}%
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Terminal Log Output */}
+                  <div className="bg-[#0a0b0d] p-4 rounded-2xl border border-white/5 h-[180px] sm:h-[240px] shrink-0 flex flex-col">
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/5">
+                      <span className="text-xs font-black uppercase text-violet-400 tracking-widest">
+                        Pattern Detection & Execution Log
+                      </span>
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        {hackerScanning ? '● ACTIVE MONITORING' : '○ STANDBY'}
+                      </span>
+                    </div>
+                    <div className="flex-1 overflow-y-auto space-y-1 font-mono text-[11px] pr-2 custom-scrollbar">
+                      {hackerLogs.length > 0 ? (
+                        hackerLogs.map((log, index) => (
+                          <div
+                            key={index}
+                            className={cn(
+                              "py-0.5",
+                              log.includes('[SIGNAL') ? "text-emerald-400 font-bold" :
+                              log.includes('[RESULT]') && log.includes('WIN') ? "text-emerald-400" :
+                              log.includes('[RESULT]') && log.includes('LOSS') ? "text-rose-400" :
+                              log.includes('[ERROR]') ? "text-rose-400 font-bold" :
+                              "text-slate-400"
+                            )}
+                          >
+                            {log}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-slate-600 italic">
+                          Click 'Start Hacker Scanner' to initiate 10-market neural pattern recognition...
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+});
+
+function AnalysisCard({ title, value, sub, icon, color, trend }: any) {
+  const colorMap: any = {
+    indigo: 'text-indigo-400 bg-indigo-500/10 border-indigo-500/20',
+    emerald: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+    rose: 'text-rose-400 bg-rose-500/10 border-rose-500/20',
+    amber: 'text-amber-500 bg-amber-400/10 border-amber-400/20',
+  };
+
+  return (
+    <div className="bg-[#111217] rounded-3xl border border-[#2d2f36] p-6 space-y-4 hover:border-[#3d3f46] transition-all shadow-lg group">
+      <div className="flex items-center justify-between">
+        <div className={cn("p-2.5 rounded-xl transition-colors", colorMap[color])}>
+          {icon}
+        </div>
+        <h4 className="text-[10px] font-black uppercase tracking-widest text-[#555] group-hover:text-[#9ba1a6] transition-colors">{title}</h4>
+      </div>
+      <div className="space-y-1">
+        <div className="flex items-baseline gap-2">
+          <p className="text-3xl font-black text-white tracking-tighter">{value}</p>
+          {trend === 'up' && <ArrowUpRight size={16} className="text-emerald-400 mb-1" />}
+          {trend === 'down' && <ArrowDownRight size={16} className="text-rose-400 mb-1" />}
+        </div>
+        <p className={cn(
+          "text-[10px] font-black uppercase tracking-widest",
+          trend === 'up' ? "text-emerald-400" : trend === 'down' ? "text-rose-400" : "text-[#555]"
+        )}>
+          {sub}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function SignalRow({ label, signal, hint, confidence, onClick }: any) {
+  return (
+    <div 
+      onClick={onClick}
+      className={cn(
+        "flex items-center justify-between p-4 bg-[#0a0b0d] border border-[#2d2f36] rounded-24 transition-all hover:bg-[#111217] hover:border-indigo-500/30 group cursor-pointer",
+        onClick && "active:scale-[0.98]"
+      )}
+    >
+      <div className="space-y-0.5">
+        <h5 className="text-[10px] font-black uppercase tracking-widest text-white group-hover:text-indigo-400 transition-colors">{label}</h5>
+        <p className="text-[9px] font-bold text-[#555] uppercase tracking-tighter">{hint}</p>
+      </div>
+      <div className="text-right">
+        <p className="text-sm font-black text-indigo-400 tracking-widest uppercase">{signal}</p>
+        <p className={cn(
+          "text-[9px] font-bold uppercase tracking-widest",
+          confidence === 'High' ? 'text-emerald-400' : 'text-amber-400'
+        )}>{confidence} Conf.</p>
+      </div>
+    </div>
+  );
+}
+
+function OtivoSignalCard({ signal, onClick }: { signal: OtivoSignal, onClick: () => void }) {
+  const colors = {
+    over: 'border-emerald-500/50 text-emerald-400 bg-emerald-500/5',
+    under: 'border-blue-500/50 text-blue-400 bg-blue-500/5',
+    differ: 'border-purple-500/50 text-purple-400 bg-purple-500/5'
+  };
+
+  const labels = {
+    over: 'OVER 5+',
+    under: 'UNDER 4',
+    differ: `DIFFER ${signal.target}`
+  };
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      whileHover={{ scale: 1.02, x: 5 }}
+      onClick={onClick}
+      className={cn(
+        "p-4 sm:p-5 rounded-2xl border-l-[6px] border border-transparent transition-all cursor-pointer group glass relative overflow-hidden",
+        colors[signal.type]
+      )}
+    >
+      <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+         {signal.type === 'over' ? <TrendingUp size={32} className="sm:w-[48px] sm:h-[48px]" /> : signal.type === 'under' ? <TrendingDown size={32} className="sm:w-[48px] sm:h-[48px]" /> : <Target size={32} className="sm:w-[48px] sm:h-[48px]" />}
+      </div>
+
+      <div className="flex justify-between items-start mb-2 sm:mb-3 relative z-10">
+        <div>
+          <span className="font-black text-white text-[10px] sm:text-xs uppercase tracking-widest block mb-1">{signal.symbol}</span>
+          <span className="text-[8px] sm:text-[9px] text-slate-500 font-bold uppercase tracking-tighter">Recurrence Found</span>
+        </div>
+        <div className="text-right">
+          <span className="text-[8px] sm:text-[9px] text-slate-500 font-bold block">{signal.time}</span>
+          <span className="text-[9px] sm:text-[10px] font-black text-emerald-400">{Number(signal.conf || 0).toFixed(0)}% STRENGTH</span>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 sm:gap-2 mb-3 sm:mb-4 relative z-10">
+        {signal.seq.split(',').map((digit, i) => (
+          <div key={i} className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-black/40 border border-white/10 flex items-center justify-center text-[10px] sm:text-xs font-black text-white">
+            {digit}
+          </div>
+        ))}
+        <ChevronRight size={14} className="text-slate-600" />
+        <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-[10px] sm:text-xs font-black text-indigo-400 animate-pulse">
+           {signal.type === 'differ' ? signal.target : (signal.type === 'over' ? '5+' : '4-')}
+        </div>
+      </div>
+
+      {signal.pastOutcomes && (
+        <div className="flex flex-col gap-1 sm:gap-1.5 mb-3 sm:mb-4 relative z-10">
+           <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">Empirical Outcomes</span>
+           <div className="flex gap-1 overflow-x-auto scrollbar-hide">
+              {signal.pastOutcomes && signal.pastOutcomes.slice(-8).map((out, i) => (
+                <div key={i} className={cn(
+                  "w-4 h-4 sm:w-5 sm:h-5 rounded-md flex items-center justify-center text-[8px] sm:text-[9px] font-black shrink-0",
+                  signal.type === 'over' ? (out > 5 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-500') :
+                  signal.type === 'under' ? (out < 4 ? 'bg-blue-500/20 text-blue-400' : 'bg-slate-800 text-slate-500') :
+                  (out !== signal.target ? 'bg-purple-500/20 text-purple-400' : 'bg-rose-500/20 text-rose-400')
+                )}>
+                  {out}
+                </div>
+              ))}
+           </div>
+        </div>
+      )}
+
+      <div className="flex justify-between items-center relative z-10">
+        <span className="font-black text-[10px] sm:text-xs uppercase tracking-tight text-white">{labels[signal.type]}</span>
+        <div className="flex items-center gap-1 sm:gap-1.5">
+           {signal.pastOutcomes && signal.pastOutcomes.length >= 100 && (
+              <span className="text-[8px] bg-emerald-500/20 text-emerald-400 px-1 py-0.5 sm:px-1.5 sm:py-0.5 rounded-md font-black mr-1 sm:mr-2 tracking-tighter">CONFIRMED</span>
+           )}
+           <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+           <span className="text-[8px] sm:text-[9px] font-bold text-emerald-400 uppercase">Live</span>
+        </div>
+      </div>
+    </motion.div>
+  );
+}

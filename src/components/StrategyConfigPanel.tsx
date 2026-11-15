@@ -19,6 +19,7 @@ import {
   TradeType,
   VALID_DIGITS,
 } from '../types';
+import { ContractIcon, MarketLogo } from './ContractIcons';
 
 interface StrategyConfigPanelProps {
   settings: BotSettings;
@@ -186,22 +187,25 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
             <label htmlFor="market-select" className="block text-xs font-medium text-slate-400 mb-1.5">
               Volatility Market
             </label>
-            <select
-              id="market-select"
-              value={settings.market}
-              disabled={isRunning}
-              onChange={(e) => {
-                update({ market: e.target.value });
-                onMarketPreviewChange(e.target.value);
-              }}
-              className="w-full rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-60"
-            >
-              {MARKETS.map((m) => (
-                <option key={m.symbol} value={m.symbol}>
-                  {m.label} ({m.symbol})
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-2.5">
+              <MarketLogo symbol={settings.market} />
+              <select
+                id="market-select"
+                value={settings.market}
+                disabled={isRunning}
+                onChange={(e) => {
+                  update({ market: e.target.value });
+                  onMarketPreviewChange(e.target.value);
+                }}
+                className="flex-1 rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none disabled:opacity-60"
+              >
+                {MARKETS.map((m) => (
+                  <option key={m.symbol} value={m.symbol}>
+                    {m.label} ({m.symbol})
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div>
@@ -268,7 +272,7 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
           </div>
 
           {settings.mode === 'single' ? (
-            <div className="grid grid-cols-3 gap-1.5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
               {ALL_TRADE_TYPES.map((t) => {
                 const active = settings.types[0] === t;
                 return (
@@ -277,13 +281,14 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
                     type="button"
                     disabled={isRunning}
                     onClick={() => handleSelectSingleType(t)}
-                    className={`rounded-lg border px-2 py-2 text-xs font-medium transition-colors whitespace-nowrap truncate ${
+                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors whitespace-nowrap truncate ${
                       active
                         ? 'border-blue-500 bg-blue-600/15 text-white'
                         : 'border-[#1F2937] bg-[#0B0F17] text-slate-400 hover:border-slate-700 hover:text-slate-200'
                     }`}
                   >
-                    {t}
+                    <ContractIcon type={t} className="w-5 h-5" />
+                    <span className="truncate">{t}</span>
                   </button>
                 );
               })}
@@ -303,6 +308,7 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
                       <span className="font-mono text-[11px] text-slate-500">
                         {idx + 1}.
                       </span>
+                      <ContractIcon type={t} className="w-4 h-4" />
                       <span className="text-xs font-medium text-white">{t}</span>
                     </div>
                     <div className="flex items-center gap-1">
@@ -735,15 +741,21 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
       </div>
 
       {/* Primary Action Footer */}
-      <div className="border-t border-[#1F2937] p-5">
+      <div className="border-t border-[#1F2937] p-5 space-y-2">
         {!connected ? (
-          <button
-            type="button"
-            onClick={onOpenTokenModal}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-500"
-          >
-            <span>Connect API Token to Trade</span>
-          </button>
+          <>
+            <button
+              type="button"
+              disabled
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#1F2937] px-4 py-2.5 text-sm font-semibold text-slate-400 cursor-not-allowed"
+            >
+              <Play className="h-4 w-4 fill-current" />
+              <span>Start Trading Bot</span>
+            </button>
+            <p className="text-center text-[11px] text-slate-500">
+              Use Connect API Token in the top navigation bar to authorize trading.
+            </p>
+          </>
         ) : isRunning ? (
           <button
             type="button"

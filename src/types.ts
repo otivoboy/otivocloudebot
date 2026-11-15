@@ -29,13 +29,35 @@ export const MARKETS: MarketInfo[] = [
   { label: 'Vol 15 (1s)', symbol: '1HZ15V', decimals: 2 },
   { label: 'Vol 25', symbol: 'R_25', decimals: 3 },
   { label: 'Vol 25 (1s)', symbol: '1HZ25V', decimals: 2 },
+  { label: 'Vol 30 (1s)', symbol: '1HZ30V', decimals: 3 },
   { label: 'Vol 50', symbol: 'R_50', decimals: 4 },
   { label: 'Vol 50 (1s)', symbol: '1HZ50V', decimals: 2 },
   { label: 'Vol 75', symbol: 'R_75', decimals: 4 },
   { label: 'Vol 75 (1s)', symbol: '1HZ75V', decimals: 2 },
-  { label: 'Vol 90 (1s)', symbol: '1HZ90V', decimals: 2 },
+  { label: 'Vol 90 (1s)', symbol: '1HZ90V', decimals: 3 },
   { label: 'Vol 100', symbol: 'R_100', decimals: 2 },
   { label: 'Vol 100 (1s)', symbol: '1HZ100V', decimals: 2 },
+];
+
+export const MT5_SYMBOLS: MarketInfo[] = [
+  { label: 'Boom 50', symbol: 'BOOM50', decimals: 4 },
+  { label: 'Boom 150', symbol: 'BOOM150', decimals: 4 },
+  { label: 'Boom 300', symbol: 'BOOM300N', decimals: 4 },
+  { label: 'Boom 500', symbol: 'BOOM500', decimals: 4 },
+  { label: 'Boom 1000', symbol: 'BOOM1000', decimals: 4 },
+  { label: 'Crash 50', symbol: 'CRASH50', decimals: 4 },
+  { label: 'Crash 150', symbol: 'CRASH150', decimals: 4 },
+  { label: 'Crash 300', symbol: 'CRASH300N', decimals: 4 },
+  { label: 'Crash 500', symbol: 'CRASH500', decimals: 4 },
+  { label: 'Crash 1000', symbol: 'CRASH1000', decimals: 4 },
+  { label: 'Volatility 10 (1s)', symbol: '1HZ10V', decimals: 2 },
+  { label: 'Volatility 10', symbol: 'R_10', decimals: 3 },
+  { label: 'Volatility 25 (1s)', symbol: '1HZ25V', decimals: 2 },
+  { label: 'Volatility 25', symbol: 'R_25', decimals: 3 },
+  { label: 'Volatility 50 (1s)', symbol: '1HZ50V', decimals: 2 },
+  { label: 'Volatility 50', symbol: 'R_50', decimals: 4 },
+  { label: 'Volatility 100 (1s)', symbol: '1HZ100V', decimals: 2 },
+  { label: 'Volatility 100', symbol: 'R_100', decimals: 2 },
 ];
 
 export const ALL_TRADE_TYPES: TradeType[] = [
@@ -114,6 +136,14 @@ export interface TickPoint {
   lastDigit: number;
 }
 
+export type ContractStage =
+  | 'NOT_RUNNING'
+  | 'STARTING'
+  | 'PURCHASE_SENT'
+  | 'CONTRACT_OPEN'
+  | 'CONTRACT_CLOSED'
+  | 'IS_STOPPING';
+
 export interface TradeRecord {
   id: string;
   seq: number;
@@ -125,6 +155,7 @@ export interface TradeRecord {
   label: string;
   contractIds: string[];
   stake: number;
+  payout: number;
   currency: string;
   ticks: number;
   entrySpot?: number;
@@ -139,6 +170,7 @@ export interface TradeRecord {
 
 export interface SessionStats {
   status: 'idle' | 'running' | 'stopping' | 'error';
+  contractStage: ContractStage;
   startedAt?: string;
   stoppedReason?: string;
   errorMessage?: string;
@@ -150,6 +182,8 @@ export interface SessionStats {
   virtualLossesStreak: number;
   vneed: number;
   inRealPhase: boolean;
+  totalStake: number;
+  totalPayout: number;
   totalProfit: number;
   currentStake: number;
   baseStake: number;
@@ -167,6 +201,18 @@ export interface LogEntry {
   message: string;
 }
 
+export interface OpenPosition {
+  id: string;
+  symbol: string;
+  contractType: string;
+  buyPrice: number;
+  profit: number;
+  currency: string;
+  entrySpot?: number;
+  currentSpot?: number;
+  isSold?: boolean;
+}
+
 export interface AppSnapshot {
   account: AccountInfo | null;
   session: SessionStats;
@@ -175,6 +221,9 @@ export interface AppSnapshot {
   strategies: SavedStrategy[];
   ticks: TickPoint[];
   tickMarket: string;
+  settings?: BotSettings;
+  multiTicks?: Record<string, TickPoint[]>;
+  positions?: OpenPosition[];
 }
 
 export const DEFAULT_SETTINGS: BotSettings = {

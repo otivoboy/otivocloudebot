@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { DerivBotEngine } from './server/derivEngine.ts';
-import { BotSettings } from './src/types.ts';
+import type { BotSettings } from './src/types.ts';
 
 dotenv.config();
 
@@ -89,6 +89,70 @@ app.post('/api/market/subscribe', async (req, res) => {
   }
 });
 
+app.post('/api/markets/subscribe', async (req, res) => {
+  try {
+    const symbols = Array.isArray(req.body?.symbols) ? req.body.symbols.map(String) : [];
+    await engine.subscribeMultiMarkets(symbols);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to subscribe to multi markets.' });
+  }
+});
+
+app.get('/api/settings', (_req, res) => {
+  res.json({ settings: engine.getSettings() });
+});
+
+app.put('/api/settings', (req, res) => {
+  try {
+    const next = req.body?.settings as BotSettings;
+    if (!next || typeof next !== 'object') {
+      res.status(400).json({ error: 'Invalid settings payload.' });
+      return;
+    }
+    const saved = engine.saveSettings(next);
+    res.json({ settings: saved });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to save settings.' });
+  }
+});
+
+app.get('/api/mt/portfolio', async (_req, res) => {
+  try {
+    const positions = await engine.fetchPortfolio();
+    res.json({ positions });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to fetch portfolio.' });
+  }
+});
+
+app.post('/api/mt/order', async (req, res) => {
+  try {
+    const { symbol, contractType, stake, multiplier, duration, durationUnit } = req.body ?? {};
+    const position = await engine.placeManualOrder({
+      symbol: String(symbol ?? ''),
+      contractType: String(contractType ?? 'MULTUP'),
+      stake: Number(stake),
+      multiplier: multiplier !== undefined ? Number(multiplier) : undefined,
+      duration: duration !== undefined ? Number(duration) : undefined,
+      durationUnit: durationUnit !== undefined ? String(durationUnit) : undefined,
+    });
+    res.json({ position });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Order failed.' });
+  }
+});
+
+app.post('/api/mt/close', async (req, res) => {
+  try {
+    const { contractId } = req.body ?? {};
+    await engine.closePosition(String(contractId ?? ''));
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to close position.' });
+  }
+});
+
 app.post('/api/session/start', async (req, res) => {
   try {
     const settings = req.body?.settings as BotSettings;
@@ -105,6 +169,15 @@ app.post('/api/session/stop', async (_req, res) => {
     res.json({ ok: true });
   } catch (err: any) {
     res.status(400).json({ error: err?.message || 'Failed to stop trading session.' });
+  }
+});
+
+app.post('/api/session/reset', (_req, res) => {
+  try {
+    engine.resetStats();
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to reset stats.' });
   }
 });
 
@@ -141,7 +214,12 @@ app.delete('/api/strategies/:id', (req, res) => {
 });
 
 async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production' && fs.existsSync(path.resolve(process.cwd(), 'dist'));
+  const distPath = path.resolve(process.cwd(), 'dist');
+  const isProd =
+    (process.env.NODE_ENV === 'production' ||
+      (process.env.NODE_ENV !== 'development' &&
+        process.env.npm_lifecycle_event !== 'dev')) &&
+    fs.existsSync(distPath);
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
@@ -151,7 +229,6 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -159,7 +236,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`DerivBot Studio server running on http://0.0.0.0:${PORT}`);
+    console.log(`OTIVO AI CLOUD server running on http://0.0.0.0:${PORT}`);
   });
 }
 
