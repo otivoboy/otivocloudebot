@@ -26,6 +26,7 @@ interface StrategyConfigPanelProps {
   session: SessionStats;
   onSaveStrategy: (name: string) => Promise<void>;
   actionError: string | null;
+  hasVirtualToken: boolean;
 }
 
 export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
@@ -35,6 +36,7 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
   session,
   onSaveStrategy,
   actionError,
+  hasVirtualToken,
 }) => {
   const [saveOpen, setSaveOpen] = useState(false);
   const [strategyName, setStrategyName] = useState('');
@@ -54,7 +56,7 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
 
   const selectedDigitTypes = Array.from(
     new Set(settings.types.filter((t) => DIGIT_TYPES.includes(t)))
-  ) as ('Differs' | 'Over' | 'Under')[];
+  ) as ('Differs' | 'Match' | 'Over' | 'Under')[];
 
   const neededBarriers: ('Higher' | 'Lower')[] = [];
   if (settings.types.includes('Higher') || settings.types.includes('Dual H/L')) {
@@ -645,49 +647,51 @@ export const StrategyConfigPanel: React.FC<StrategyConfigPanelProps> = ({
           )}
         </div>
 
-        {/* Virtual Mode */}
-        <div className="space-y-3 border-t border-[#1F2937] pt-4">
-          <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-xs font-medium text-slate-200">Virtual Loss Filter</span>
-            <input
-              type="checkbox"
-              disabled={isRunning}
-              checked={settings.virtual}
-              onChange={(e) => update({ virtual: e.target.checked })}
-              className="h-4 w-4 rounded border-[#1F2937] bg-[#0B0F17] accent-blue-600"
-            />
-          </label>
+        {/* Gated Virtual Strategies (Unlocked only when Virtual API Token is configured in Deriv API Connection) */}
+        {hasVirtualToken && (
+          <div className="space-y-3 border-t border-[#1F2937] pt-4">
+            <label className="flex items-center justify-between cursor-pointer">
+              <span className="text-xs font-medium text-slate-200">Virtual Loss Filter</span>
+              <input
+                type="checkbox"
+                disabled={isRunning}
+                checked={settings.virtual}
+                onChange={(e) => update({ virtual: e.target.checked })}
+                className="h-4 w-4 rounded border-[#1F2937] bg-[#0B0F17] accent-blue-600"
+              />
+            </label>
 
-          {settings.virtual && (
-            <div className="space-y-2.5 pl-1">
-              <div>
-                <label htmlFor="vneed-input" className="block text-[11px] text-slate-400 mb-1">
-                  Consecutive virtual losses before real trade (1-50)
+            {settings.virtual && (
+              <div className="space-y-2.5 pl-1">
+                <div>
+                  <label htmlFor="vneed-input" className="block text-[11px] text-slate-400 mb-1">
+                    Consecutive virtual losses before real trade (1-50)
+                  </label>
+                  <input
+                    id="vneed-input"
+                    type="number"
+                    min="1"
+                    max="50"
+                    disabled={isRunning}
+                    value={settings.vneed}
+                    onChange={(e) => update({ vneed: Number(e.target.value) })}
+                    className="w-full rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-1.5 font-mono text-xs text-white tabular-nums focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={isRunning}
+                    checked={settings.cont}
+                    onChange={(e) => update({ cont: e.target.checked })}
+                    className="h-3.5 w-3.5 accent-blue-600"
+                  />
+                  <span>Continuous real trades on loss until win</span>
                 </label>
-                <input
-                  id="vneed-input"
-                  type="number"
-                  min="1"
-                  max="50"
-                  disabled={isRunning}
-                  value={settings.vneed}
-                  onChange={(e) => update({ vneed: Number(e.target.value) })}
-                  className="w-full rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-1.5 font-mono text-xs text-white tabular-nums focus:border-blue-500 focus:outline-none"
-                />
               </div>
-              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  disabled={isRunning}
-                  checked={settings.cont}
-                  onChange={(e) => update({ cont: e.target.checked })}
-                  className="h-3.5 w-3.5 accent-blue-600"
-                />
-                <span>Continuous real trades on loss until win</span>
-              </label>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
 
         {/* Take Profit & Stop Loss */}
         <div className="grid grid-cols-2 gap-3 border-t border-[#1F2937] pt-4">

@@ -12,6 +12,7 @@ interface StrategiesViewProps {
   ) => Promise<void>;
   onDeleteStrategy: (id: string) => Promise<void>;
   sessionRunning: boolean;
+  hasVirtualToken?: boolean;
 }
 
 export const StrategiesView: React.FC<StrategiesViewProps> = ({
@@ -20,6 +21,7 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
   onUpdateStrategy,
   onDeleteStrategy,
   sessionRunning,
+  hasVirtualToken = false,
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -170,10 +172,14 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
                         </span>
                       </div>
                       <div>
-                        <span className="block text-slate-500">Martingale / Virtual</span>
+                        <span className="block text-slate-500">
+                          {hasVirtualToken ? 'Martingale / Virtual' : 'Martingale'}
+                        </span>
                         <span className="font-mono font-medium text-slate-200 tabular-nums">
-                          {cfg.mart ? `x${cfg.mult}` : 'Off'} ·{' '}
-                          {cfg.virtual ? `${cfg.vneed}L` : 'Off'}
+                          {cfg.mart ? `x${cfg.mult}` : 'Off'}
+                          {hasVirtualToken
+                            ? ` · ${cfg.virtual ? `${cfg.vneed}L` : 'Off'}`
+                            : ''}
                         </span>
                       </div>
                       <div>

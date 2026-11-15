@@ -11,14 +11,18 @@ import {
   LogOut,
   RefreshCw,
 } from 'lucide-react';
-import { AccountInfo, AuthMode } from '../types';
+import { AccountInfo, AuthMode, VirtualAccountInfo } from '../types';
+import { VirtualTokenSettings } from './VirtualTokenSettings';
 
 interface TokenModalProps {
   open: boolean;
   onClose: () => void;
   account: AccountInfo | null;
+  virtualAccount: VirtualAccountInfo | null;
+  hasVirtualToken: boolean;
   onConnected: (account: AccountInfo) => void;
   onDisconnected: () => void;
+  onVirtualUpdated: (v: VirtualAccountInfo | null) => void;
   onRefreshBalance: () => Promise<void>;
   sessionRunning: boolean;
 }
@@ -27,8 +31,11 @@ export const TokenModal: React.FC<TokenModalProps> = ({
   open,
   onClose,
   account,
+  virtualAccount,
+  hasVirtualToken,
   onConnected,
   onDisconnected,
+  onVirtualUpdated,
   onRefreshBalance,
   sessionRunning,
 }) => {
@@ -37,7 +44,6 @@ export const TokenModal: React.FC<TokenModalProps> = ({
   const [authMode, setAuthMode] = useState<AuthMode>('api_token');
   const [accountId, setAccountId] = useState('');
   const [appId, setAppId] = useState('');
-  const [virtualToken, setVirtualToken] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +76,6 @@ export const TokenModal: React.FC<TokenModalProps> = ({
         authMode,
         accountId: accountId.trim() || undefined,
         appId: appId.trim() || undefined,
-        virtualToken: virtualToken.trim() || undefined,
       };
       const res = await fetch('/api/account/connect', {
         method: 'POST',
@@ -88,7 +93,6 @@ export const TokenModal: React.FC<TokenModalProps> = ({
       }
       onConnected(data.account);
       setToken('');
-      setVirtualToken('');
       onClose();
     } catch (err: any) {
       setError(err?.message || 'Failed to authenticate with Deriv.');
@@ -124,8 +128,8 @@ export const TokenModal: React.FC<TokenModalProps> = ({
       aria-modal="true"
       aria-labelledby="token-modal-title"
     >
-      <div className="w-full max-w-lg rounded-xl border border-[#1F2937] bg-[#111827] shadow-2xl">
-        <div className="flex items-center justify-between border-b border-[#1F2937] px-6 py-4">
+      <div className="w-full max-w-lg max-h-[90vh] flex flex-col rounded-xl border border-[#1F2937] bg-[#111827] shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between border-b border-[#1F2937] px-6 py-4 shrink-0">
           <h2 id="token-modal-title" className="text-base font-semibold text-white">
             Deriv API Connection
           </h2>
@@ -139,7 +143,7 @@ export const TokenModal: React.FC<TokenModalProps> = ({
           </button>
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-5 overflow-y-auto custom-scrollbar">
           {account && account.connected && (
             <div className="rounded-lg border border-[#1F2937] bg-[#0B0F17] p-4 space-y-3">
               <div className="flex items-center justify-between gap-4">
@@ -290,46 +294,24 @@ export const TokenModal: React.FC<TokenModalProps> = ({
                 ) : (
                   <ChevronDown className="h-3.5 w-3.5" />
                 )}
-                <span>Advanced Options (App ID &amp; Optional Virtual Demo Token)</span>
+                <span>Advanced Options (Custom App ID)</span>
               </button>
 
               {showAdvanced && (
-                <div className="mt-3 space-y-3 rounded-lg border border-[#1F2937] bg-[#0B0F17] p-3.5">
-                  <div>
-                    <label htmlFor="deriv-app-id" className="block text-xs font-medium text-slate-300 mb-1">
-                      Deriv App ID (optional)
-                    </label>
-                    <input
-                      id="deriv-app-id"
-                      type="text"
-                      value={appId}
-                      onChange={(e) => setAppId(e.target.value)}
-                      placeholder={authMode === 'pat' ? '34SRQBBtI5nwEFQqmc3se' : '1089'}
-                      className="w-full rounded-lg border border-[#1F2937] bg-[#111827] px-3 py-2 font-mono text-xs text-white placeholder-slate-600 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="virtual-demo-token" className="block text-xs font-medium text-slate-300 mb-1">
-                      Separate Virtual Demo Token (optional)
-                    </label>
-                    <input
-                      id="virtual-demo-token"
-                      type="password"
-                      value={virtualToken}
-                      onChange={(e) => setVirtualToken(e.target.value)}
-                      placeholder="Leave empty to run virtual phase on live Deriv tick feed"
-                      className="w-full rounded-lg border border-[#1F2937] bg-[#111827] px-3 py-2 font-mono text-xs text-white placeholder-slate-600 focus:border-blue-500 focus:outline-none"
-                    />
-                  </div>
+                <div className="mt-3 rounded-lg border border-[#1F2937] bg-[#0B0F17] p-3.5">
+                  <label htmlFor="deriv-app-id" className="block text-xs font-medium text-slate-300 mb-1">
+                    Deriv App ID (optional)
+                  </label>
+                  <input
+                    id="deriv-app-id"
+                    type="text"
+                    value={appId}
+                    onChange={(e) => setAppId(e.target.value)}
+                    placeholder={authMode === 'pat' ? '34SRQBBtI5nwEFQqmc3se' : '1089'}
+                    className="w-full rounded-lg border border-[#1F2937] bg-[#111827] px-3 py-2 font-mono text-xs text-white placeholder-slate-600 focus:border-blue-500 focus:outline-none"
+                  />
                 </div>
               )}
-            </div>
-
-            <div className="flex items-start gap-2.5 rounded-lg border border-amber-900/40 bg-amber-950/20 p-3 text-xs text-amber-200/90">
-              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
-              <p className="leading-relaxed">
-                Test with a <strong>Demo</strong> account first and use a token with <strong>Read + Trade</strong> scopes only. Martingale and Fast execution can amplify losses rapidly.
-              </p>
             </div>
 
             {error && (
@@ -355,6 +337,24 @@ export const TokenModal: React.FC<TokenModalProps> = ({
               </button>
             </div>
           </form>
+
+          {/* Virtual Mode API / PAT Token Section (Only in Deriv API Connection) */}
+          <div className="border-t border-[#1F2937] pt-4">
+            <VirtualTokenSettings
+              virtualAccount={virtualAccount}
+              hasVirtualToken={hasVirtualToken}
+              onVirtualUpdated={onVirtualUpdated}
+              disabled={sessionRunning}
+              variant="terminal"
+            />
+          </div>
+
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-900/40 bg-amber-950/20 p-3 text-xs text-amber-200/90">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400 mt-0.5" />
+            <p className="leading-relaxed">
+              Test with a <strong>Demo</strong> account first and use a token with <strong>Read + Trade</strong> scopes only. Martingale and Fast execution can amplify losses rapidly.
+            </p>
+          </div>
         </div>
       </div>
     </div>

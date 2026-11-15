@@ -15,9 +15,11 @@ import type {
   TickPoint,
   TradeRecord,
   TradeType,
+  VirtualAccountInfo,
 } from '../src/types.ts';
 import {
   MARKETS,
+  AUTOBOT_MARKETS,
   MT5_SYMBOLS,
   DEFAULT_SETTINGS,
   BARRIER_TYPES,
@@ -34,6 +36,7 @@ const PUBLIC_WS_URL = `wss://api.derivws.com/trading/v1/options/ws/public?app_id
 const MAX_MART_STAKE = 1_000_000;
 const STRATEGIES_FILE = path.resolve(process.cwd(), 'data', 'strategies.json');
 const CONNECTION_FILE = path.resolve(process.cwd(), 'data', 'connection.json');
+const VIRTUAL_CONNECTION_FILE = path.resolve(process.cwd(), 'data', 'virtual_connection.json');
 const SETTINGS_FILE = path.resolve(process.cwd(), 'data', 'settings.json');
 
 type Listener = (event: string, payload: unknown) => void;
@@ -56,10 +59,12 @@ const EXTRA_MARKET_DECIMALS: Record<string, number> = {
 const MARKET_DECIMALS: Record<string, number> = {
   ...EXTRA_MARKET_DECIMALS,
   ...Object.fromEntries(MT5_SYMBOLS.map((m) => [m.symbol, m.decimals])),
+  ...Object.fromEntries(AUTOBOT_MARKETS.map((m) => [m.symbol, m.decimals])),
   ...Object.fromEntries(MARKETS.map((m) => [m.symbol, m.decimals])),
 };
 const MARKET_LABELS: Record<string, string> = {
   ...Object.fromEntries(MT5_SYMBOLS.map((m) => [m.symbol, m.label])),
+  ...Object.fromEntries(AUTOBOT_MARKETS.map((m) => [m.symbol, m.label])),
   ...Object.fromEntries(MARKETS.map((m) => [m.symbol, m.label])),
 };
 
@@ -281,6 +286,16 @@ export class DerivBotEngine {
     virtualToken?: string;
   } | null = null;
 
+  private virtualAccount: VirtualAccountInfo | null = null;
+  private virtualCredentials: {
+    token: string;
+    authMode: AuthMode;
+    accountId?: string;
+    appId: string;
+  } | null = null;
+  private virtualConn: DerivWsConnection | null = null;
+  private virtualPingInterval: NodeJS.Timeout | null = null;
+
   private accountConn: DerivWsConnection | null = null;
   private tickConn: DerivWsConnection | null = null;
   private tickMarket = 'R_100';
@@ -373,9 +388,19 @@ export class DerivBotEngine {
     this.emit('active_trade', trade);
   }
 
+  hasVirtualToken(): boolean {
+    return Boolean(this.virtualCredentials?.token?.trim() && this.virtualAccount?.connected);
+  }
+
+  getVirtualAccount(): VirtualAccountInfo | null {
+    return this.virtualAccount;
+  }
+
   getSnapshot(): AppSnapshot {
     return {
       account: this.account,
+      virtualAccount: this.virtualAccount,
+      hasVirtualToken: this.hasVirtualToken(),
       session: this.session,
       activeTrade: this.activeTrade,
       trades: this.trades,
@@ -416,7 +441,11 @@ export class DerivBotEngine {
   }
 
   saveSettings(next: BotSettings): BotSettings {
-    this.settings = { ...structuredClone(DEFAULT_SETTINGS), ...structuredClone(next) };
+    const merged = { ...structuredClone(DEFAULT_SETTINGS), ...structuredClone(next) };
+    if (!this.hasVirtualToken()) {
+      merged.virtual = false;
+    }
+    this.settings = merged;
     try {
       this.ensureDataDir();
       fs.writeFileSync(SETTINGS_FILE, JSON.stringify(this.settings, null, 2));
@@ -452,22 +481,69 @@ export class DerivBotEngine {
     }
   }
 
-  private async restorePersistedConnection(): Promise<void> {
+  private saveVirtualConnectionToDisk(creds: {
+    token: string;
+    authMode: AuthMode;
+    accountId?: string;
+    appId: string;
+  }): void {
     try {
-      if (!fs.existsSync(CONNECTION_FILE)) return;
-      const raw = fs.readFileSync(CONNECTION_FILE, 'utf-8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed.token === 'string' && parsed.token.trim()) {
-        await this.connectAccount({
-          token: parsed.token,
-          authMode: parsed.authMode,
-          accountId: parsed.accountId,
-          appId: parsed.appId,
-          virtualToken: parsed.virtualToken,
-        });
+      this.ensureDataDir();
+      fs.writeFileSync(VIRTUAL_CONNECTION_FILE, JSON.stringify(creds, null, 2));
+    } catch {
+      // ignore
+    }
+  }
+
+  private clearVirtualConnectionFromDisk(): void {
+    try {
+      if (fs.existsSync(VIRTUAL_CONNECTION_FILE)) {
+        fs.unlinkSync(VIRTUAL_CONNECTION_FILE);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private async restorePersistedConnection(): Promise<void> {
+    let legacyVirtualToken: string | undefined;
+    try {
+      if (fs.existsSync(CONNECTION_FILE)) {
+        const raw = fs.readFileSync(CONNECTION_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.token === 'string' && parsed.token.trim()) {
+          legacyVirtualToken = typeof parsed.virtualToken === 'string' ? parsed.virtualToken.trim() : undefined;
+          await this.connectAccount({
+            token: parsed.token,
+            authMode: parsed.authMode,
+            accountId: parsed.accountId,
+            appId: parsed.appId,
+          });
+        }
       }
     } catch {
       // ignore invalid saved connection on boot
+    }
+
+    try {
+      if (fs.existsSync(VIRTUAL_CONNECTION_FILE)) {
+        const vRaw = fs.readFileSync(VIRTUAL_CONNECTION_FILE, 'utf-8');
+        const vParsed = JSON.parse(vRaw);
+        if (vParsed && typeof vParsed.token === 'string' && vParsed.token.trim()) {
+          await this.connectVirtualToken({
+            token: vParsed.token,
+            authMode: vParsed.authMode,
+            accountId: vParsed.accountId,
+            appId: vParsed.appId,
+          });
+          return;
+        }
+      }
+      if (legacyVirtualToken) {
+        await this.connectVirtualToken({ token: legacyVirtualToken });
+      }
+    } catch {
+      // ignore invalid virtual saved connection on boot
     }
   }
 
@@ -951,7 +1027,158 @@ export class DerivBotEngine {
     this.startTickStream(this.tickMarket).catch(() => {});
     this.fetchPortfolio().catch(() => {});
 
+    if (params.virtualToken?.trim()) {
+      await this.connectVirtualToken({ token: params.virtualToken.trim() }).catch(() => {});
+    }
+
     return info;
+  }
+
+  private attachVirtualListeners(conn: DerivWsConnection): void {
+    conn.onMessage((msg) => {
+      if (msg.msg_type === 'balance' && msg.balance && this.virtualAccount) {
+        const nextBal = Number(msg.balance.balance);
+        const nextCur = msg.balance.currency
+          ? String(msg.balance.currency)
+          : this.virtualAccount.currency;
+        const loginId = msg.balance.loginid
+          ? String(msg.balance.loginid)
+          : this.virtualAccount.loginId;
+        const isVirtual =
+          typeof msg.balance.is_virtual === 'number'
+            ? msg.balance.is_virtual === 1
+            : this.virtualAccount.isVirtual;
+
+        this.virtualAccount = {
+          ...this.virtualAccount,
+          balance: nextBal,
+          currency: nextCur,
+          loginId,
+          isVirtual,
+          accountType: isVirtual ? 'DEMO' : 'REAL',
+          lastUpdated: nowIso(),
+        };
+        this.emit('virtual_account', this.virtualAccount);
+      }
+    });
+  }
+
+  async connectVirtualToken(params: {
+    token: string;
+    authMode?: AuthMode;
+    accountId?: string;
+    appId?: string;
+  }): Promise<VirtualAccountInfo> {
+    const token = params.token.trim();
+    if (!token) {
+      throw new Error('Please enter a Virtual API or PAT token.');
+    }
+
+    const authMode: AuthMode =
+      params.authMode ?? (token.startsWith('pat_') ? 'pat' : 'api_token');
+    const appId =
+      params.appId?.trim() ||
+      (authMode === 'pat' ? DEFAULT_PAT_APP_ID : DEFAULT_WS_APP_ID);
+
+    const vCreds = {
+      token,
+      authMode,
+      accountId: params.accountId?.trim() || undefined,
+      appId,
+    };
+
+    const { conn, info } = await this.openAccountConnection(vCreds);
+
+    if (this.virtualConn) {
+      await this.virtualConn.close().catch(() => {});
+    }
+    if (this.virtualPingInterval) {
+      clearInterval(this.virtualPingInterval);
+    }
+
+    const vAccount: VirtualAccountInfo = {
+      connected: true,
+      authMode,
+      accountId: vCreds.accountId,
+      loginId: info.loginId,
+      accountType: info.accountType,
+      isVirtual: info.isVirtual,
+      balance: info.balance,
+      currency: info.currency,
+      appId: info.appId,
+      lastUpdated: nowIso(),
+    };
+
+    this.virtualCredentials = vCreds;
+    this.virtualConn = conn;
+    this.virtualAccount = vAccount;
+    this.attachVirtualListeners(conn);
+
+    this.virtualPingInterval = setInterval(() => {
+      if (this.virtualConn?.isOpen()) {
+        this.virtualConn.request({ ping: 1 }).catch(() => {});
+      }
+    }, 25_000);
+
+    this.saveVirtualConnectionToDisk(vCreds);
+    this.emit('virtual_account', this.virtualAccount);
+    this.addLog(
+      'info',
+      `Virtual Mode enabled (${vAccount.accountType} · ${vAccount.loginId} · ${vAccount.balance.toFixed(2)} ${vAccount.currency}).`
+    );
+
+    return vAccount;
+  }
+
+  async disconnectVirtualToken(): Promise<void> {
+    if (this.virtualPingInterval) {
+      clearInterval(this.virtualPingInterval);
+      this.virtualPingInterval = null;
+    }
+    if (this.virtualConn) {
+      await this.virtualConn.close().catch(() => {});
+      this.virtualConn = null;
+    }
+    this.virtualCredentials = null;
+    this.virtualAccount = null;
+    this.clearVirtualConnectionFromDisk();
+
+    if (this.credentials?.virtualToken) {
+      this.credentials = { ...this.credentials, virtualToken: undefined };
+      this.saveConnectionToDisk(this.credentials);
+    }
+
+    if (this.settings.virtual) {
+      this.saveSettings({ ...this.settings, virtual: false });
+    }
+
+    this.emit('virtual_account', null);
+    this.addLog('info', 'Virtual token removed. Virtual strategies hidden until reconfigured.');
+  }
+
+  private async ensureVirtualConn(): Promise<DerivWsConnection> {
+    if (!this.virtualCredentials?.token) {
+      throw new Error('Virtual API / PAT token is not configured in Settings.');
+    }
+    if (this.virtualConn?.isOpen()) return this.virtualConn;
+
+    const { conn, info } = await this.openAccountConnection(this.virtualCredentials);
+    this.virtualConn = conn;
+    this.virtualAccount = {
+      connected: true,
+      authMode: this.virtualCredentials.authMode,
+      accountId: this.virtualCredentials.accountId,
+      loginId: info.loginId,
+      accountType: info.accountType,
+      isVirtual: info.isVirtual,
+      balance: info.balance,
+      currency: info.currency,
+      appId: info.appId,
+      lastUpdated: nowIso(),
+    };
+    this.attachVirtualListeners(conn);
+    this.emit('virtual_account', this.virtualAccount);
+    return conn;
   }
 
   async refreshBalance(): Promise<AccountInfo> {
@@ -1196,6 +1423,9 @@ export class DerivBotEngine {
         }
       }
     }
+    if (!this.hasVirtualToken()) {
+      s.virtual = false;
+    }
     if (s.virtual && (s.vneed < 1 || s.vneed > 50)) {
       throw new Error('Virtual losses required must be between 1 and 50.');
     }
@@ -1209,7 +1439,7 @@ export class DerivBotEngine {
 
   private pickParam(s: BotSettings, t: TradeType): string | number | null {
     if (DIGIT_TYPES.includes(t)) {
-      const dt = t as 'Differs' | 'Over' | 'Under';
+      const dt = t as 'Differs' | 'Match' | 'Over' | 'Under';
       const fixed = s.digits[dt];
       if (fixed !== null && fixed !== undefined) return fixed;
       const pool = VALID_DIGITS[dt];
@@ -1232,6 +1462,8 @@ export class DerivBotEngine {
     switch (t) {
       case 'Differs':
         return 'DIGITDIFF';
+      case 'Match':
+        return 'DIGITMATCH';
       case 'Over':
         return 'DIGITOVER';
       case 'Under':
@@ -1655,6 +1887,9 @@ export class DerivBotEngine {
     if (t === 'Differs') {
       won = exit.lastDigit !== Number(param);
       profit = won ? Number((vStake * 0.09).toFixed(2)) : -vStake;
+    } else if (t === 'Match') {
+      won = exit.lastDigit === Number(param);
+      profit = won ? Number((vStake * 8.0).toFixed(2)) : -vStake;
     } else if (t === 'Over') {
       won = exit.lastDigit > Number(param);
       profit = won ? Number((vStake * 0.95).toFixed(2)) : -vStake;
@@ -1835,25 +2070,19 @@ export class DerivBotEngine {
       throw new Error('Failed to reconnect to Deriv WebSocket after multiple attempts.');
     };
 
-    // Optional separate virtual demo connection if user provided virtualToken
+    // Use configured Virtual API/PAT connection for Virtual Phase when s.virtual is true
     let virtualConn: DerivWsConnection | null = null;
-    let virtualCurrency = 'USD';
-    let virtualAuthMode: AuthMode = 'api_token';
+    let virtualCurrency = this.virtualAccount?.currency || 'USD';
+    let virtualAuthMode: AuthMode = this.virtualCredentials?.authMode || 'api_token';
 
-    if (s.virtual && this.credentials?.virtualToken) {
+    if (s.virtual && this.hasVirtualToken()) {
       try {
-        const vToken = this.credentials.virtualToken;
-        virtualAuthMode = vToken.startsWith('pat_') ? 'pat' : 'api_token';
-        const res = await this.openAccountConnection({
-          token: vToken,
-          authMode: virtualAuthMode,
-          appId: DEFAULT_WS_APP_ID,
-        });
-        virtualConn = res.conn;
-        virtualCurrency = res.info.currency;
+        virtualConn = await this.ensureVirtualConn();
+        virtualCurrency = this.virtualAccount?.currency || 'USD';
+        virtualAuthMode = this.virtualCredentials!.authMode;
         this.addLog(
           'info',
-          `Virtual phase linked to Demo account ${res.info.loginId} (${res.info.balance.toFixed(2)} ${virtualCurrency}).`
+          `Virtual phase active on ${this.virtualAccount?.loginId} (${(this.virtualAccount?.balance ?? 0).toFixed(2)} ${virtualCurrency}).`
         );
       } catch (err: any) {
         this.addLog(
@@ -1863,9 +2092,11 @@ export class DerivBotEngine {
         virtualConn = null;
       }
     } else if (s.virtual) {
+      s.virtual = false;
+      inRealPhase = true;
       this.addLog(
         'info',
-        `Virtual mode active: waiting for ${s.vneed} consecutive virtual loss(es) on live market ticks.`
+        'Virtual mode skipped: no Virtual API/PAT token configured in Settings.'
       );
     }
 
@@ -2014,6 +2245,7 @@ export class DerivBotEngine {
             this.session = { ...this.session, inRealPhase: true };
             this.emit('session', this.session);
             this.addLog('warn', `Virtual loss target (${s.vneed}) reached. Switching to REAL trade (${t}).`);
+            continue;
           }
 
           if (!fast && !this.stopRequested) {
@@ -2274,11 +2506,396 @@ export class DerivBotEngine {
       this.addLog('error', `Session halted: ${msg}`);
     } finally {
       this.setActiveTrade(null);
-      if (virtualConn) {
-        await virtualConn.close().catch(() => {});
-      }
       this.stopRequested = false;
       this.activeLoopPromise = null;
+    }
+  }
+
+  // ---------- AutoBot Single-Signal Trade Execution (Real or Virtual Token) ----------
+  async executeAutoBotTrade(params: {
+    symbol: string;
+    contractType:
+      | 'digitdiff'
+      | 'digitmatch'
+      | 'digitover'
+      | 'digitunder'
+      | 'digiteven'
+      | 'digitodd'
+      | 'accumulator'
+      | 'dual_ou';
+    prediction: number;
+    prediction2?: number;
+    stake: number;
+    duration?: number;
+    growthRate?: number;
+    takeProfit?: number;
+    isVirtual: boolean;
+    strategyName?: string;
+  }): Promise<{
+    won: boolean;
+    profit: number;
+    stake: number;
+    payout: number;
+    contractIds: string[];
+    isVirtual: boolean;
+    entrySpot?: number;
+    exitSpot?: number;
+    balanceAfter?: number;
+    currency: string;
+    legs?: number[];
+  }> {
+    const symbol = String(params.symbol || '').trim();
+    if (!symbol) {
+      throw new Error('Market symbol is required.');
+    }
+
+    const isVirtual = Boolean(params.isVirtual);
+    if (isVirtual && !this.hasVirtualToken()) {
+      throw new Error('Virtual API / PAT token must be saved in Deriv API Connection before executing Virtual trades.');
+    }
+    if (!isVirtual && (!this.account || !this.credentials)) {
+      throw new Error('Connect your Deriv Real/Demo API token first.');
+    }
+
+    const ctype = params.contractType;
+    const rawStake = Number(params.stake);
+    // Hardcoded stakes for Virtual Mode API account: $1.00 USD for Accumulators, $0.35 USD for all others
+    const stake = isVirtual
+      ? ctype === 'accumulator'
+        ? 1.0
+        : 0.35
+      : rawStake;
+    if (!Number.isFinite(stake) || stake <= 0) {
+      throw new Error('Trade stake must be greater than 0.');
+    }
+
+    const ensureTargetConn = async (): Promise<DerivWsConnection> => {
+      if (isVirtual) {
+        return this.ensureVirtualConn();
+      }
+      if (this.accountConn?.isOpen()) return this.accountConn;
+      if (!this.credentials) throw new Error('Account credentials cleared.');
+      const { conn, info } = await this.openAccountConnection(this.credentials);
+      this.accountConn = conn;
+      this.account = info;
+      this.attachAccountListeners(conn);
+      this.emit('account', this.account);
+      return conn;
+    };
+
+    const conn = await ensureTargetConn();
+    // Pre-warm primary real/demo socket during virtual trades so virtual->real transition has zero handshake lag
+    if (isVirtual && this.credentials && !this.accountConn?.isOpen()) {
+      void this.openAccountConnection(this.credentials)
+        .then(({ conn: rConn, info: rInfo }) => {
+          if (!this.accountConn?.isOpen()) {
+            this.accountConn = rConn;
+            this.account = rInfo;
+            this.attachAccountListeners(rConn);
+            this.emit('account', this.account);
+          } else {
+            void rConn.close();
+          }
+        })
+        .catch(() => {});
+    }
+
+    const authMode: AuthMode = isVirtual
+      ? this.virtualCredentials!.authMode
+      : this.credentials!.authMode;
+    const currency = isVirtual
+      ? this.virtualAccount?.currency || 'USD'
+      : this.account!.currency || 'USD';
+    const symbolKey = authMode === 'pat' ? 'underlying_symbol' : 'symbol';
+    const duration = Math.max(1, Math.min(10, Math.round(params.duration ?? 1)));
+
+    const tradeTypeEnum: TradeType =
+      ctype === 'digitdiff'
+        ? 'Differs'
+        : ctype === 'digitmatch'
+        ? 'Match'
+        : ctype === 'digitover'
+        ? 'Over'
+        : ctype === 'digitunder'
+        ? 'Under'
+        : ctype === 'digiteven'
+        ? 'Even'
+        : ctype === 'digitodd'
+        ? 'Odd'
+        : ctype === 'accumulator'
+        ? 'Accumulator'
+        : 'Dual O5/U4';
+
+    const label =
+      params.strategyName?.trim() ||
+      (ctype === 'dual_ou'
+        ? `AutoBot Dual O${params.prediction}/U${params.prediction2 ?? 4}`
+        : ctype === 'accumulator'
+        ? `AutoBot ACCU ${Math.round((params.growthRate ?? 0.02) * 100)}%`
+        : ctype === 'digiteven' || ctype === 'digitodd'
+        ? `AutoBot ${tradeTypeEnum}`
+        : `AutoBot ${tradeTypeEnum} ${params.prediction}`);
+
+    const activeId = crypto.randomUUID();
+    const effectiveStake = ctype === 'dual_ou' ? Number((stake * 2).toFixed(2)) : Number(stake.toFixed(2));
+    const emitActive = (cids: string[], entry?: number, current?: number) => {
+      this.setActiveTrade({
+        id: activeId,
+        isVirtual,
+        market: symbol,
+        marketLabel: MARKET_LABELS[symbol] || symbol,
+        contractType: tradeTypeEnum,
+        label,
+        contractIds: cids,
+        stake: effectiveStake,
+        currency,
+        ticks: ctype === 'accumulator' ? 0 : duration,
+        entrySpot: entry,
+        currentSpot: current,
+        timestamp: nowIso(),
+      });
+      this.session = {
+        ...this.session,
+        contractStage: 'PURCHASE_SENT',
+        activeType: tradeTypeEnum,
+        inRealPhase: !isVirtual,
+      };
+      this.emit('session', this.session);
+    };
+
+    const onEntrySpot = (entry: number, current?: number) => {
+      if (this.activeTrade && this.activeTrade.id === activeId) {
+        this.setActiveTrade({
+          ...this.activeTrade,
+          entrySpot: entry,
+          currentSpot: current,
+        });
+      }
+    };
+
+    try {
+      let profit = 0;
+      let cids: string[] = [];
+      let entrySpot: number | undefined;
+      let exitSpot: number | undefined;
+      let legs: number[] | undefined;
+
+      if (ctype === 'dual_ou') {
+        const overBarrier = String(Math.max(0, Math.min(8, Math.round(params.prediction))));
+        const underBarrier = String(Math.max(1, Math.min(9, Math.round(params.prediction2 ?? 4))));
+        const legDefs = [
+          { ctype: 'DIGITOVER', barrier: overBarrier },
+          { ctype: 'DIGITUNDER', barrier: underBarrier },
+        ];
+        const props = await Promise.all(
+          legDefs.map((leg) =>
+            conn.request({
+              proposal: 1,
+              amount: stake,
+              basis: 'stake',
+              contract_type: leg.ctype,
+              currency,
+              duration,
+              duration_unit: 't',
+              [symbolKey]: symbol,
+              barrier: leg.barrier,
+            })
+          )
+        );
+        for (let i = 0; i < props.length; i++) {
+          if (props[i].error) {
+            throw new Error(`${legDefs[i].ctype} ${legDefs[i].barrier}: ${props[i].error.message}`);
+          }
+        }
+        const buys = await Promise.all(
+          props.map((p) => conn.request({ buy: p.proposal.id, price: stake }))
+        );
+        const errs: string[] = [];
+        for (const b of buys) {
+          if (b.error) errs.push(b.error.message);
+          else cids.push(String(b.buy.contract_id));
+        }
+        if (cids.length === 0) {
+          throw new Error(errs[0] || 'Failed to purchase dual Over/Under legs.');
+        }
+        emitActive(cids);
+        const settled = await this.waitSettled(conn, cids, ensureTargetConn, onEntrySpot);
+        if (errs.length > 0) {
+          throw new Error(`One Dual O/U leg failed: ${errs[0]}`);
+        }
+        legs = cids.map((c) => settled.profits[c] ?? 0);
+        profit = Number(legs.reduce((a, b) => a + b, 0).toFixed(2));
+        entrySpot = settled.entrySpot;
+        exitSpot = settled.exitSpot;
+      } else {
+        const proposalReq: Record<string, unknown> =
+          ctype === 'accumulator'
+            ? {
+                proposal: 1,
+                amount: stake,
+                basis: 'stake',
+                contract_type: 'ACCU',
+                currency,
+                growth_rate: Math.max(0.01, Math.min(0.05, Number(params.growthRate ?? 0.02))),
+                [symbolKey]: symbol,
+                limit_order: { take_profit: Math.max(0.01, Number(params.takeProfit ?? 0.1)) },
+              }
+            : ctype === 'digiteven' || ctype === 'digitodd'
+            ? {
+                proposal: 1,
+                amount: stake,
+                basis: 'stake',
+                contract_type: ctype.toUpperCase(),
+                currency,
+                duration,
+                duration_unit: 't',
+                [symbolKey]: symbol,
+              }
+            : {
+                proposal: 1,
+                amount: stake,
+                basis: 'stake',
+                contract_type: ctype.toUpperCase(),
+                currency,
+                duration,
+                duration_unit: 't',
+                [symbolKey]: symbol,
+                barrier: String(Math.max(0, Math.min(9, Math.round(params.prediction)))),
+              };
+
+        const prop = await conn.request(proposalReq);
+        if (prop.error) {
+          throw new Error(prop.error.message);
+        }
+        const propId = prop.proposal?.id;
+        if (!propId) {
+          throw new Error('Proposal ID missing from Deriv response.');
+        }
+        const buyRes = await conn.request({ buy: propId, price: stake });
+        if (buyRes.error) {
+          throw new Error(buyRes.error.message);
+        }
+        const cid = String(buyRes.buy.contract_id);
+        cids = [cid];
+        emitActive(cids);
+        const settled = await this.waitSettled(conn, cids, ensureTargetConn, onEntrySpot);
+        profit = Number((settled.profits[cid] ?? 0).toFixed(2));
+        entrySpot = settled.entrySpot;
+        exitSpot = settled.exitSpot;
+      }
+
+      const won = profit > 0;
+      const payout = profit > 0 ? Number((effectiveStake + profit).toFixed(2)) : 0;
+
+      // Refresh balance in background so Virtual->Real transition returns with zero lag
+      const balanceAfter = isVirtual ? this.virtualAccount?.balance : this.account?.balance;
+      void conn
+        .request({ balance: 1 })
+        .then((balRes) => {
+          if (!balRes.error && balRes.balance) {
+            const liveBal = Number(balRes.balance.balance);
+            if (isVirtual && this.virtualAccount) {
+              this.virtualAccount = {
+                ...this.virtualAccount,
+                balance: liveBal,
+                lastUpdated: nowIso(),
+              };
+              this.emit('virtual_account', this.virtualAccount);
+            } else if (!isVirtual && this.account) {
+              this.account = {
+                ...this.account,
+                balance: liveBal,
+                lastUpdated: nowIso(),
+              };
+              this.emit('account', this.account);
+            }
+          }
+        })
+        .catch(() => {});
+
+      // Update global RunPanel session counters for AutoBot / Analysis Tool / Frequency Bot trades
+      if (isVirtual) {
+        const nextVStreak = won ? 0 : (this.session.virtualLossesStreak || 0) + 1;
+        this.session = {
+          ...this.session,
+          contractStage: 'CONTRACT_CLOSED',
+          virtualTrades: this.session.virtualTrades + 1,
+          virtualWins: this.session.virtualWins + (won ? 1 : 0),
+          virtualLossesStreak: nextVStreak,
+          inRealPhase: false,
+          activeType: tradeTypeEnum,
+          currency: this.account?.currency || this.session.currency || currency,
+        };
+      } else {
+        const nextTotalStake = Number((this.session.totalStake + effectiveStake).toFixed(2));
+        const nextTotalPayout = Number((this.session.totalPayout + payout).toFixed(2));
+        const nextTotalProfit = Number((this.session.totalProfit + profit).toFixed(2));
+        const nextStep = won ? 0 : (this.session.martingaleStep || 0) + 1;
+        this.session = {
+          ...this.session,
+          contractStage: 'CONTRACT_CLOSED',
+          realTrades: this.session.realTrades + 1,
+          realWins: this.session.realWins + (won ? 1 : 0),
+          realLosses: this.session.realLosses + (won ? 0 : 1),
+          totalStake: nextTotalStake,
+          totalPayout: nextTotalPayout,
+          totalProfit: nextTotalProfit,
+          currentStake: effectiveStake,
+          martingaleStep: nextStep,
+          inRealPhase: true,
+          activeType: tradeTypeEnum,
+          currency: this.account?.currency || this.session.currency || currency,
+        };
+      }
+
+      const nextSeq = (this.trades[0]?.seq ?? 0) + 1;
+      const record: TradeRecord = {
+        id: crypto.randomUUID(),
+        seq: nextSeq,
+        timestamp: nowIso(),
+        isVirtual,
+        market: symbol,
+        marketLabel: MARKET_LABELS[symbol] || symbol,
+        contractType: tradeTypeEnum,
+        label,
+        contractIds: cids,
+        stake: effectiveStake,
+        payout,
+        currency,
+        ticks: ctype === 'accumulator' ? 0 : duration,
+        entrySpot,
+        exitSpot,
+        profit,
+        won,
+        legs,
+        martingaleStep: isVirtual ? 0 : this.session.martingaleStep,
+        sessionTotalAfter: this.session.totalProfit,
+        balanceAfter,
+      };
+
+      this.trades = [record, ...this.trades].slice(0, 500);
+      this.emit('trade', record);
+      this.emit('session', this.session);
+      this.addLog(
+        won ? 'win' : 'loss',
+        `${isVirtual ? 'VIRTUAL' : 'REAL'} ${label} on ${MARKET_LABELS[symbol] || symbol} (stake ${effectiveStake}) · ${won ? 'WIN' : 'LOSS'} ${profit >= 0 ? '+' : ''}${profit.toFixed(2)} ${currency}`
+      );
+
+      return {
+        won,
+        profit,
+        stake: effectiveStake,
+        payout,
+        contractIds: cids,
+        isVirtual,
+        entrySpot,
+        exitSpot,
+        balanceAfter,
+        currency,
+        legs,
+      };
+    } finally {
+      this.setActiveTrade(null);
     }
   }
 }

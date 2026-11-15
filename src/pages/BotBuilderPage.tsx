@@ -23,6 +23,7 @@ import { ContractIcon, MarketLogo } from '../components/ContractIcons';
 
 interface BotBuilderPageProps {
   connected: boolean;
+  hasVirtualToken: boolean;
   session: SessionStats;
   currency: string;
   onStartWithSettings: (settings: BotSettings) => Promise<void>;
@@ -138,6 +139,7 @@ function loadWorkspace(): { name: string; settings: BotSettings } {
 
 export const BotBuilderPage: React.FC<BotBuilderPageProps> = ({
   connected,
+  hasVirtualToken,
   session,
   currency,
   onStartWithSettings,
@@ -348,7 +350,9 @@ export const BotBuilderPage: React.FC<BotBuilderPageProps> = ({
               disabled={isRunning}
               onClick={() => {
                 setStrategyName(tpl.name);
-                setSettings(structuredClone(tpl.settings));
+                const cloned = structuredClone(tpl.settings);
+                if (!hasVirtualToken) cloned.virtual = false;
+                setSettings(cloned);
                 setMessage(`Loaded template "${tpl.name}".`);
               }}
               className="rounded-xl border border-[#1F2937] bg-[#111827] p-3.5 text-left hover:border-blue-500/60 transition-colors space-y-1.5 disabled:opacity-50"
@@ -457,8 +461,8 @@ export const BotBuilderPage: React.FC<BotBuilderPageProps> = ({
                   </label>
                   <select
                     value={
-                      settings.digits[primaryType as 'Differs' | 'Over' | 'Under'] ??
-                      VALID_DIGITS[primaryType as 'Differs' | 'Over' | 'Under'][0]
+                      settings.digits[primaryType as 'Differs' | 'Match' | 'Over' | 'Under'] ??
+                      VALID_DIGITS[primaryType as 'Differs' | 'Match' | 'Over' | 'Under'][0]
                     }
                     disabled={isRunning}
                     onChange={(e) =>
@@ -471,7 +475,7 @@ export const BotBuilderPage: React.FC<BotBuilderPageProps> = ({
                     }
                     className="w-full rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-2 font-mono text-xs text-white"
                   >
-                    {VALID_DIGITS[primaryType as 'Differs' | 'Over' | 'Under'].map((d) => (
+                    {VALID_DIGITS[primaryType as 'Differs' | 'Match' | 'Over' | 'Under'].map((d) => (
                       <option key={d} value={d}>
                         Digit {d}
                       </option>
@@ -509,44 +513,52 @@ export const BotBuilderPage: React.FC<BotBuilderPageProps> = ({
               ))}
             </div>
 
-            <label className="flex items-center justify-between rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3.5 py-2.5 text-xs text-slate-200 cursor-pointer">
-              <span>Require Virtual Loss Filter before Real Buy</span>
-              <input
-                type="checkbox"
-                disabled={isRunning}
-                checked={settings.virtual}
-                onChange={(e) => updateSettings({ virtual: e.target.checked })}
-                className="h-4 w-4 accent-emerald-500"
-              />
-            </label>
-
-            {settings.virtual && (
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">
-                    Virtual Losses Needed
-                  </label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="50"
-                    disabled={isRunning}
-                    value={settings.vneed}
-                    onChange={(e) => updateSettings({ vneed: Number(e.target.value) })}
-                    className="w-full rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-2 font-mono text-xs text-white"
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-xs text-slate-300 pt-5 cursor-pointer">
+            {hasVirtualToken ? (
+              <>
+                <label className="flex items-center justify-between rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3.5 py-2.5 text-xs text-slate-200 cursor-pointer">
+                  <span>Require Virtual Loss Filter before Real Buy</span>
                   <input
                     type="checkbox"
                     disabled={isRunning}
-                    checked={settings.cont}
-                    onChange={(e) => updateSettings({ cont: e.target.checked })}
+                    checked={settings.virtual}
+                    onChange={(e) => updateSettings({ virtual: e.target.checked })}
                     className="h-4 w-4 accent-emerald-500"
                   />
-                  <span>Continuous on loss</span>
                 </label>
-              </div>
+
+                {settings.virtual && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">
+                        Virtual Losses Needed
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="50"
+                        disabled={isRunning}
+                        value={settings.vneed}
+                        onChange={(e) => updateSettings({ vneed: Number(e.target.value) })}
+                        className="w-full rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3 py-2 font-mono text-xs text-white"
+                      />
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-300 pt-5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        disabled={isRunning}
+                        checked={settings.cont}
+                        onChange={(e) => updateSettings({ cont: e.target.checked })}
+                        className="h-4 w-4 accent-emerald-500"
+                      />
+                      <span>Continuous on loss</span>
+                    </label>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="rounded-lg border border-[#1F2937] bg-[#0B0F17] px-3.5 py-2.5 text-[11px] text-slate-500">
+                Standard real/demo entry active. Add a Virtual API/PAT token in Terminal Settings to unlock Virtual Loss Filtering.
+              </p>
             )}
           </div>
         </div>

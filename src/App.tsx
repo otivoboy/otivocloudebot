@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ShieldCheck, FlaskConical } from 'lucide-react';
 import { TopNav, NavTab } from './components/TopNav';
 import { TokenModal } from './components/TokenModal';
 import { TickChart } from './components/TickChart';
@@ -24,6 +23,7 @@ import {
   SessionStats,
   TickPoint,
   TradeRecord,
+  VirtualAccountInfo,
 } from './types';
 
 type TerminalSubTab = 'terminal' | 'strategies' | 'ledger';
@@ -108,6 +108,8 @@ export default function App() {
   const [settings, setSettings] = useState<BotSettings>(initialSettingsState.current.settings);
 
   const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [virtualAccount, setVirtualAccount] = useState<VirtualAccountInfo | null>(null);
+  const hasVirtualToken = Boolean(virtualAccount?.connected);
   const [session, setSession] = useState<SessionStats>(INITIAL_SESSION);
   const [activeTrade, setActiveTrade] = useState<ActiveTrade | null>(null);
   const [trades, setTrades] = useState<TradeRecord[]>([]);
@@ -122,6 +124,7 @@ export default function App() {
 
   const [actionError, setActionError] = useState<string | null>(null);
   const autoReconnectAttemptedRef = useRef(false);
+  const virtualAutoReconnectAttemptedRef = useRef(false);
 
   const clientPublicTicks = useDerivPublicTicks(
     watchedMultiSymbols,
@@ -209,10 +212,38 @@ export default function App() {
     }
   };
 
+  const tryAutoReconnectVirtual = () => {
+    if (virtualAutoReconnectAttemptedRef.current) return;
+    virtualAutoReconnectAttemptedRef.current = true;
+    try {
+      const raw = localStorage.getItem('otivo_saved_virtual_connection');
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && typeof saved.token === 'string' && saved.token.trim()) {
+        fetch('/api/account/virtual-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(saved),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (data?.virtualAccount) setVirtualAccount(data.virtualAccount);
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   const applySnapshot = (snap: AppSnapshot) => {
     setAccount(snap.account);
     if (!snap.account?.connected) {
       tryAutoReconnect();
+    }
+    setVirtualAccount(snap.virtualAccount ?? null);
+    if (!snap.hasVirtualToken) {
+      tryAutoReconnectVirtual();
     }
     setSession(snap.session);
     setActiveTrade(snap.activeTrade ?? null);
@@ -226,9 +257,10 @@ export default function App() {
 
     // Only adopt server settings if client had no local saved settings yet
     if (!initialSettingsState.current.hadLocal && snap.settings) {
-      setSettings(snap.settings);
+      const nextSettings = snap.hasVirtualToken ? snap.settings : { ...snap.settings, virtual: false };
+      setSettings(nextSettings);
       try {
-        localStorage.setItem('otivo_bot_settings', JSON.stringify(snap.settings));
+        localStorage.setItem('otivo_bot_settings', JSON.stringify(nextSettings));
       } catch {
         // ignore
       }
@@ -271,6 +303,14 @@ export default function App() {
     es.addEventListener('account', (e) => {
       try {
         setAccount(JSON.parse((e as MessageEvent).data));
+      } catch {
+        // ignore
+      }
+    });
+
+    es.addEventListener('virtual_account', (e) => {
+      try {
+        setVirtualAccount(JSON.parse((e as MessageEvent).data));
       } catch {
         // ignore
       }
@@ -509,6 +549,13 @@ export default function App() {
     setTerminalSubTab('terminal');
   };
 
+  const handleVirtualUpdated = (v: VirtualAccountInfo | null) => {
+    setVirtualAccount(v);
+    if (!v?.connected && settings.virtual) {
+      handleSettingsChange({ ...settings, virtual: false });
+    }
+  };
+
   const winRate =
     session.realTrades > 0
       ? Math.round((session.realWins / session.realTrades) * 100)
@@ -520,7 +567,7 @@ export default function App() {
     if (session.status === 'stopping') return 'Stopping';
     if (session.status === 'error') return 'Halted (Error)';
     if (session.status === 'idle') return 'Idle';
-    if (!session.inRealPhase) {
+    if (hasVirtualToken && !session.inRealPhase) {
       return `Virtual (${session.virtualLossesStreak}/${session.vneed}L)`;
     }
     return session.activeType ? `Real · ${session.activeType}` : 'Real Trading';
@@ -563,22 +610,6 @@ export default function App() {
                   </button>
                 ))}
               </div>
-
-              {account && account.connected && (
-                <div className="flex items-center gap-2 text-xs text-slate-300">
-                  {account.isVirtual ? (
-                    <FlaskConical className="h-4 w-4 text-[#f59e0b]" />
-                  ) : (
-                    <ShieldCheck className="h-4 w-4 text-[#00a79e]" />
-                  )}
-                  <span>
-                    <strong className={account.isVirtual ? 'text-[#f59e0b]' : 'text-[#00a79e]'}>
-                      {account.isVirtual ? 'Demo account' : 'Real account'}
-                    </strong>{' '}
-                    ({account.loginId})
-                  </span>
-                </div>
-              )}
             </div>
 
             {terminalSubTab === 'terminal' && (
@@ -599,6 +630,7 @@ export default function App() {
                       session={session}
                       onSaveStrategy={(name) => handleSaveStrategy(name)}
                       actionError={actionError}
+                      hasVirtualToken={hasVirtualToken}
                     />
                   </div>
 
@@ -679,6 +711,7 @@ export default function App() {
                 sessionRunning={
                   session.status === 'running' || session.status === 'stopping'
                 }
+                hasVirtualToken={hasVirtualToken}
               />
             )}
 
@@ -692,6 +725,9 @@ export default function App() {
             session={session}
             connected={Boolean(account?.connected)}
             currency={currency}
+            accountBalance={account?.balance ?? 0}
+            accountType={account?.accountType ?? 'DEMO'}
+            hasVirtualToken={hasVirtualToken}
             onSubscribeMarkets={handleSubscribeMultiMarkets}
             onStartWithSettings={startWithSettings}
             onStopTrading={handleStopTrading}
@@ -703,6 +739,9 @@ export default function App() {
           <AnalysisPage
             multiTicks={mergedMultiTicks}
             connected={Boolean(account?.connected)}
+            accountBalance={account?.balance ?? 0}
+            currency={currency}
+            hasVirtualToken={hasVirtualToken}
             session={session}
             currentSettings={settings}
             onSubscribeMarkets={handleSubscribeMultiMarkets}
@@ -714,6 +753,7 @@ export default function App() {
         {activeTab === 'builder' && (
           <BotBuilderPage
             connected={Boolean(account?.connected)}
+            hasVirtualToken={hasVirtualToken}
             session={session}
             currency={currency}
             onStartWithSettings={startWithSettings}
@@ -745,6 +785,7 @@ export default function App() {
           logs={logs}
           currency={currency}
           connected={Boolean(account?.connected)}
+          hasVirtualToken={hasVirtualToken}
           onStartTrading={handleStartTrading}
           onStopTrading={handleStopTrading}
           onResetStats={handleResetStats}
@@ -755,8 +796,11 @@ export default function App() {
         open={tokenModalOpen}
         onClose={() => setTokenModalOpen(false)}
         account={account}
+        virtualAccount={virtualAccount}
+        hasVirtualToken={hasVirtualToken}
         onConnected={(acc) => setAccount(acc)}
         onDisconnected={() => setAccount(null)}
+        onVirtualUpdated={handleVirtualUpdated}
         onRefreshBalance={handleRefreshBalance}
         sessionRunning={
           session.status === 'running' || session.status === 'stopping'

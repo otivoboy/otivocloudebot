@@ -35,6 +35,7 @@ interface RunPanelProps {
   logs: LogEntry[];
   currency: string;
   connected: boolean;
+  hasVirtualToken?: boolean;
   onStartTrading: () => void;
   onStopTrading: () => void;
   onResetStats: () => Promise<void>;
@@ -91,6 +92,7 @@ export const RunPanel: React.FC<RunPanelProps> = ({
   logs,
   currency,
   connected,
+  hasVirtualToken = false,
   onStartTrading,
   onStopTrading,
   onResetStats,
@@ -159,6 +161,34 @@ export const RunPanel: React.FC<RunPanelProps> = ({
     }
     return logs.filter((l) => l.level === journalFilter);
   }, [logs, journalFilter]);
+
+  // Synchronized stats from session, with automatic derivation fallback from real trades
+  const stats = useMemo(() => {
+    const realList = trades.filter((t) => !t.isVirtual);
+    if (session.realTrades === 0 && realList.length > 0) {
+      const totalStake = realList.reduce((acc, t) => acc + Number(t.stake || 0), 0);
+      const totalPayout = realList.reduce((acc, t) => acc + (t.won ? Number(t.payout || 0) : 0), 0);
+      const totalProfit = realList.reduce((acc, t) => acc + Number(t.profit || 0), 0);
+      const realWins = realList.filter((t) => t.won).length;
+      const realLosses = realList.length - realWins;
+      return {
+        totalStake,
+        totalPayout,
+        realTrades: realList.length,
+        realLosses,
+        realWins,
+        totalProfit,
+      };
+    }
+    return {
+      totalStake: session.totalStake,
+      totalPayout: session.totalPayout,
+      realTrades: session.realTrades,
+      realLosses: session.realLosses,
+      realWins: session.realWins,
+      totalProfit: session.totalProfit,
+    };
+  }, [session, trades]);
 
   const activeMarketLabel =
     MARKETS.find((m) => m.symbol === settings.market)?.label ?? settings.market;
@@ -430,7 +460,7 @@ export const RunPanel: React.FC<RunPanelProps> = ({
               </span>
             </div>
 
-            {settings.virtual && (
+            {hasVirtualToken && settings.virtual && (
               <div className="flex items-center justify-between border-t border-[#1F2937] pt-2.5 text-xs">
                 <span className="text-slate-400">Virtual Filter</span>
                 <span className="font-mono font-medium text-amber-400 tabular-nums">
@@ -703,46 +733,46 @@ export const RunPanel: React.FC<RunPanelProps> = ({
         <div>
           <span className="block text-[11px] text-slate-400">Total stake</span>
           <span className="mt-0.5 block font-mono text-xs font-semibold text-white tabular-nums">
-            {session.totalStake.toFixed(2)} {currency}
+            {stats.totalStake.toFixed(2)} {currency}
           </span>
         </div>
         <div>
           <span className="block text-[11px] text-slate-400">Total payout</span>
           <span className="mt-0.5 block font-mono text-xs font-semibold text-white tabular-nums">
-            {session.totalPayout.toFixed(2)} {currency}
+            {stats.totalPayout.toFixed(2)} {currency}
           </span>
         </div>
         <div>
           <span className="block text-[11px] text-slate-400">No. of runs</span>
           <span className="mt-0.5 block font-mono text-xs font-semibold text-white tabular-nums">
-            {session.realTrades}
+            {stats.realTrades}
           </span>
         </div>
         <div>
           <span className="block text-[11px] text-slate-400">Contracts lost</span>
-          <span className="mt-0.5 block font-mono text-xs font-semibold text-white tabular-nums">
-            {session.realLosses}
+          <span className="mt-0.5 block font-mono text-xs font-semibold text-[#ff444f] tabular-nums">
+            {stats.realLosses}
           </span>
         </div>
         <div>
           <span className="block text-[11px] text-slate-400">Contracts won</span>
-          <span className="mt-0.5 block font-mono text-xs font-semibold text-white tabular-nums">
-            {session.realWins}
+          <span className="mt-0.5 block font-mono text-xs font-semibold text-[#00a79e] tabular-nums">
+            {stats.realWins}
           </span>
         </div>
         <div>
           <span className="block text-[11px] text-slate-400">Total profit/loss</span>
           <span
             className={`mt-0.5 block font-mono text-xs font-semibold tabular-nums ${
-              session.totalProfit > 0
+              stats.totalProfit > 0
                 ? 'text-[#00a79e]'
-                : session.totalProfit < 0
+                : stats.totalProfit < 0
                 ? 'text-[#ff444f]'
                 : 'text-white'
             }`}
           >
-            {session.totalProfit >= 0 ? '+' : ''}
-            {session.totalProfit.toFixed(2)} {currency}
+            {stats.totalProfit >= 0 ? '+' : ''}
+            {stats.totalProfit.toFixed(2)} {currency}
           </span>
         </div>
       </div>
@@ -914,7 +944,32 @@ export const RunPanel: React.FC<RunPanelProps> = ({
           </div>
         ) : (
           /* Docked Compact Mobile Run Bar above Bottom Navigation */
-          <div className="fixed inset-x-0 bottom-[58px] md:bottom-0 z-30 border-t border-[#1F2937] bg-[#131820]/95 backdrop-blur-md px-3 py-2.5 shadow-[0_-6px_20px_rgba(0,0,0,0.45)]">
+          <div className="fixed inset-x-0 bottom-[58px] md:bottom-0 z-30 border-t border-[#1F2937] bg-[#131820]/95 backdrop-blur-md px-3 py-2 shadow-[0_-6px_20px_rgba(0,0,0,0.45)] space-y-1.5">
+            {(trades.length > 0 || stats.realTrades > 0) && (
+              <div className="flex items-center justify-between gap-2 text-[10px] font-mono border-b border-[#1F2937]/80 pb-1">
+                <span className="text-slate-400">
+                  Runs <strong className="text-white">{stats.realTrades}</strong>
+                </span>
+                <span className="text-slate-400">
+                  W/L <strong className="text-[#00a79e]">{stats.realWins}</strong>/
+                  <strong className="text-[#ff444f]">{stats.realLosses}</strong>
+                </span>
+                <span className="text-slate-400">
+                  Stake <strong className="text-white">{stats.totalStake.toFixed(2)}</strong>
+                </span>
+                <span className="text-slate-400">
+                  Pay <strong className="text-white">{stats.totalPayout.toFixed(2)}</strong>
+                </span>
+                <span
+                  className={`font-bold ${
+                    stats.totalProfit >= 0 ? 'text-[#00a79e]' : 'text-[#ff444f]'
+                  }`}
+                >
+                  {stats.totalProfit >= 0 ? '+' : ''}
+                  {stats.totalProfit.toFixed(2)}
+                </span>
+              </div>
+            )}
             <div className="flex items-center gap-3">
               {renderRunButton()}
               <button

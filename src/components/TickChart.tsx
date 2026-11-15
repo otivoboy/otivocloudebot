@@ -53,7 +53,7 @@ export const TickChart: React.FC<TickChartProps> = ({ market, ticks }) => {
   }
 
   return (
-    <section className="rounded-xl border border-[#1F2937] bg-[#111827] p-5">
+    <section className="rounded-xl border border-[#1F2937] bg-[#111827] p-4 sm:p-5 overflow-hidden">
       <div className="flex flex-wrap items-baseline justify-between gap-4 mb-4">
         <div className="flex items-center gap-2.5">
           <MarketLogo symbol={marketInfo.symbol} />
@@ -144,9 +144,9 @@ export const TickChart: React.FC<TickChartProps> = ({ market, ticks }) => {
       </div>
 
       {/* Recent Last Digits */}
-      <div className="mt-3.5 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs text-slate-400">Recent last digits</span>
-        <div className="flex items-center gap-1.5">
+      <div className="mt-3.5 flex flex-wrap items-center justify-between gap-2 min-w-0">
+        <span className="text-xs text-slate-400 shrink-0">Recent last digits</span>
+        <div className="flex flex-wrap items-center gap-1.5 max-w-full min-w-0">
           {recentDigits.length === 0 ? (
             <span className="font-mono text-xs text-slate-600">—</span>
           ) : (
@@ -155,7 +155,7 @@ export const TickChart: React.FC<TickChartProps> = ({ market, ticks }) => {
               return (
                 <span
                   key={`${pt.epoch}-${i}`}
-                  className={`inline-flex h-6 w-6 items-center justify-center rounded font-mono text-xs font-semibold tabular-nums ${
+                  className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded font-mono text-xs font-semibold tabular-nums ${
                     isLatest
                       ? 'bg-blue-600 text-white'
                       : 'bg-[#0B0F17] border border-[#1F2937] text-slate-300'

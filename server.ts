@@ -79,6 +79,62 @@ app.post('/api/account/disconnect', async (_req, res) => {
   }
 });
 
+app.post('/api/account/virtual-token', async (req, res) => {
+  try {
+    const { token, authMode, accountId, appId } = req.body ?? {};
+    const virtualAccount = await engine.connectVirtualToken({
+      token: String(token ?? ''),
+      authMode,
+      accountId,
+      appId,
+    });
+    res.json({ virtualAccount, hasVirtualToken: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to connect virtual token.' });
+  }
+});
+
+app.delete('/api/account/virtual-token', async (_req, res) => {
+  try {
+    await engine.disconnectVirtualToken();
+    res.json({ ok: true, hasVirtualToken: false });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to remove virtual token.' });
+  }
+});
+
+app.post('/api/autobot/trade', async (req, res) => {
+  try {
+    const {
+      symbol,
+      contractType,
+      prediction,
+      prediction2,
+      stake,
+      duration,
+      growthRate,
+      takeProfit,
+      isVirtual,
+      strategyName,
+    } = req.body ?? {};
+    const result = await engine.executeAutoBotTrade({
+      symbol: String(symbol ?? ''),
+      contractType,
+      prediction: Number(prediction ?? 0),
+      prediction2: prediction2 !== undefined ? Number(prediction2) : undefined,
+      stake: Number(stake),
+      duration: duration !== undefined ? Number(duration) : undefined,
+      growthRate: growthRate !== undefined ? Number(growthRate) : undefined,
+      takeProfit: takeProfit !== undefined ? Number(takeProfit) : undefined,
+      isVirtual: Boolean(isVirtual),
+      strategyName: strategyName ? String(strategyName) : undefined,
+    });
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'AutoBot trade failed.' });
+  }
+});
+
 app.post('/api/market/subscribe', async (req, res) => {
   try {
     const { market } = req.body ?? {};

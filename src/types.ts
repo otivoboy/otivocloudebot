@@ -5,6 +5,7 @@ export type TradingMode = 'single' | 'hybrid';
 
 export type TradeType =
   | 'Differs'
+  | 'Match'
   | 'Over'
   | 'Under'
   | 'Even'
@@ -26,7 +27,7 @@ export interface MarketInfo {
 export const MARKETS: MarketInfo[] = [
   { label: 'Vol 10', symbol: 'R_10', decimals: 3 },
   { label: 'Vol 10 (1s)', symbol: '1HZ10V', decimals: 2 },
-  { label: 'Vol 15 (1s)', symbol: '1HZ15V', decimals: 2 },
+  { label: 'Vol 15 (1s)', symbol: '1HZ15V', decimals: 3 },
   { label: 'Vol 25', symbol: 'R_25', decimals: 3 },
   { label: 'Vol 25 (1s)', symbol: '1HZ25V', decimals: 2 },
   { label: 'Vol 30 (1s)', symbol: '1HZ30V', decimals: 3 },
@@ -37,6 +38,28 @@ export const MARKETS: MarketInfo[] = [
   { label: 'Vol 90 (1s)', symbol: '1HZ90V', decimals: 3 },
   { label: 'Vol 100', symbol: 'R_100', decimals: 2 },
   { label: 'Vol 100 (1s)', symbol: '1HZ100V', decimals: 2 },
+];
+
+export const AUTOBOT_MARKETS: MarketInfo[] = [
+  { label: 'Vol 10 (1s) Index', symbol: '1HZ10V', decimals: 2 },
+  { label: 'Vol 15 (1s) Index', symbol: '1HZ15V', decimals: 3 },
+  { label: 'Vol 25 (1s) Index', symbol: '1HZ25V', decimals: 2 },
+  { label: 'Vol 30 (1s) Index', symbol: '1HZ30V', decimals: 3 },
+  { label: 'Vol 50 (1s) Index', symbol: '1HZ50V', decimals: 2 },
+  { label: 'Vol 75 (1s) Index', symbol: '1HZ75V', decimals: 2 },
+  { label: 'Vol 90 (1s) Index', symbol: '1HZ90V', decimals: 3 },
+  { label: 'Vol 100 (1s) Index', symbol: '1HZ100V', decimals: 2 },
+  { label: 'Vol 10 Index', symbol: 'R_10', decimals: 3 },
+  { label: 'Vol 25 Index', symbol: 'R_25', decimals: 3 },
+  { label: 'Vol 50 Index', symbol: 'R_50', decimals: 4 },
+  { label: 'Vol 75 Index', symbol: 'R_75', decimals: 4 },
+  { label: 'Vol 100 Index', symbol: 'R_100', decimals: 2 },
+  { label: 'Jump 10 Index', symbol: 'JD10', decimals: 2 },
+  { label: 'Jump 25 Index', symbol: 'JD25', decimals: 2 },
+  { label: 'Jump 50 Index', symbol: 'JD50', decimals: 2 },
+  { label: 'Jump 100 Index', symbol: 'JD100', decimals: 2 },
+  { label: 'Bull Market Index', symbol: 'RDBULL', decimals: 4 },
+  { label: 'Bear Market Index', symbol: 'RDBEAR', decimals: 4 },
 ];
 
 export const MT5_SYMBOLS: MarketInfo[] = [
@@ -62,6 +85,7 @@ export const MT5_SYMBOLS: MarketInfo[] = [
 
 export const ALL_TRADE_TYPES: TradeType[] = [
   'Differs',
+  'Match',
   'Over',
   'Under',
   'Even',
@@ -75,12 +99,13 @@ export const ALL_TRADE_TYPES: TradeType[] = [
   'Dual H/L',
 ];
 
-export const DIGIT_TYPES: TradeType[] = ['Differs', 'Over', 'Under'];
+export const DIGIT_TYPES: TradeType[] = ['Differs', 'Match', 'Over', 'Under'];
 export const BARRIER_TYPES: TradeType[] = ['Higher', 'Lower'];
 export const DUAL_TYPES: TradeType[] = ['Dual O5/U4', 'Dual H/L'];
 
-export const VALID_DIGITS: Record<'Differs' | 'Over' | 'Under', number[]> = {
+export const VALID_DIGITS: Record<'Differs' | 'Match' | 'Over' | 'Under', number[]> = {
   Differs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+  Match: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
   Over: [0, 1, 2, 3, 4, 5, 6, 7, 8],
   Under: [1, 2, 3, 4, 5, 6, 7, 8, 9],
 };
@@ -90,7 +115,7 @@ export interface BotSettings {
   exec: ExecSpeed;
   mode: TradingMode;
   types: TradeType[];
-  digits: Partial<Record<'Differs' | 'Over' | 'Under', number | null>>;
+  digits: Partial<Record<'Differs' | 'Match' | 'Over' | 'Under', number | null>>;
   barriers: Partial<Record<'Higher' | 'Lower', string>>;
   growth: number; // 0.01 to 0.05
   atp: number; // Accumulator take profit >= 0.01
@@ -126,6 +151,19 @@ export interface AccountInfo {
   fullname?: string;
   email?: string;
   scopes?: string[];
+  appId: string;
+  lastUpdated: string;
+}
+
+export interface VirtualAccountInfo {
+  connected: boolean;
+  authMode: AuthMode;
+  accountId?: string;
+  loginId: string;
+  accountType: 'REAL' | 'DEMO';
+  isVirtual: boolean;
+  balance: number;
+  currency: string;
   appId: string;
   lastUpdated: string;
 }
@@ -231,6 +269,8 @@ export interface OpenPosition {
 
 export interface AppSnapshot {
   account: AccountInfo | null;
+  virtualAccount: VirtualAccountInfo | null;
+  hasVirtualToken: boolean;
   session: SessionStats;
   activeTrade?: ActiveTrade | null;
   trades: TradeRecord[];
