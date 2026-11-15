@@ -1,0 +1,6 @@
+{
+  "name": "DerivBot Studio",
+  "description": "Automated Deriv options trading terminal with live API token balance, automatic Real and Demo account detection, hybrid strategies, martingale, and virtual loss filtering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
