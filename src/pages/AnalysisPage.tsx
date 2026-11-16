@@ -27,6 +27,7 @@ import { OtivoSignal } from '../components/analysis/AnalysisCharts';
 import { ClassicFrequencyView, ClassicAnalysisResult } from '../components/analysis/ClassicFrequencyView';
 import { NEURAL_MARKETS, OtivoNeuralModal } from '../components/analysis/OtivoNeuralModal';
 import { AiMarketHackerModal } from '../components/analysis/AiMarketHackerModal';
+import type { CloudBotsSnapshot } from '../types/cloudBots';
 
 export {
   IngestionBuffer,
@@ -55,6 +56,8 @@ export interface AnalysisPageProps {
   hasVirtualToken: boolean;
   session: SessionStats;
   currentSettings: BotSettings;
+  cloudBots?: CloudBotsSnapshot | null;
+  onCloudBotsUpdate?: (snap: CloudBotsSnapshot) => void;
   onSubscribeMarkets: (symbols: string[]) => void;
   onLoadToTerminal: (settings: BotSettings) => void;
   onStartWithSettings: (settings: BotSettings) => Promise<void>;
@@ -66,6 +69,8 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
   accountBalance,
   hasVirtualToken,
   currentSettings,
+  cloudBots,
+  onCloudBotsUpdate,
   onSubscribeMarkets,
   onLoadToTerminal,
 }) => {
@@ -618,14 +623,9 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
     Record<string, Record<string, { total: number; next: number[]; outcomes: number[] }>>
   >({});
 
-  const [isAutoTrading, setIsAutoTrading] = useState(false);
-  const autoTradingRef = useRef(false);
   const [marketSwitchMode, setMarketSwitchMode] = useState<'off' | 'loss' | 'always'>(
     () => (localStorage.getItem('scanner_market_switch_mode') as any) || 'loss'
   );
-  const [currentAutoStake, setCurrentAutoStake] = useState(1);
-  const [autoSessionProfit, setAutoSessionProfit] = useState(0);
-  const [tpSlResult, setTpSlResult] = useState<{ type: 'tp' | 'sl'; profit: number } | null>(null);
 
   const [showHackerModal, setShowHackerModal] = useState(false);
   const [hackerScanning, setHackerScanning] = useState(false);
@@ -1170,12 +1170,48 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
     return () => clearTimeout(timer);
   }, [runMarketScan]);
 
-  // AI Scanner Auto-Trade loop via POST /api/autobot/trade
-  const stopAutoTrade = useCallback(() => {
-    autoTradingRef.current = false;
-    setIsAutoTrading(false);
-    notify('info', 'AI Scanner Bot stopped.');
-  }, [notify]);
+  // AI Scanner state derived from cloud server
+  const aiScannerState = cloudBots?.aiScanner;
+  const isAutoTrading = Boolean(aiScannerState?.running);
+  const autoSessionProfit = aiScannerState?.sessionProfit ?? 0;
+  const currentAutoStake = aiScannerState?.currentStake ?? scannerSettings.stake;
+  const tpSlResult = aiScannerState?.tpSlResult ?? null;
+  const lastScannerToastIdRef = useRef<number>(aiScannerState?.lastEvent?.id ?? 0);
+  const lastScannerSymbolRef = useRef<string | null>(aiScannerState?.symbol ?? null);
+
+  useEffect(() => {
+    const evt = aiScannerState?.lastEvent;
+    if (evt && evt.id > lastScannerToastIdRef.current) {
+      lastScannerToastIdRef.current = evt.id;
+      notify(evt.type, evt.message);
+    }
+  }, [aiScannerState?.lastEvent, notify]);
+
+  useEffect(() => {
+    if (aiScannerState?.running && aiScannerState.symbol && aiScannerState.symbol !== lastScannerSymbolRef.current) {
+      lastScannerSymbolRef.current = aiScannerState.symbol;
+      if (aiScannerState.symbol !== symbol) {
+        setSymbol(aiScannerState.symbol);
+      }
+    } else if (!aiScannerState?.running) {
+      lastScannerSymbolRef.current = null;
+    }
+  }, [aiScannerState?.running, aiScannerState?.symbol, symbol]);
+
+  const stopAutoTrade = useCallback(async () => {
+    try {
+      const res = await fetch('/api/cloud-bots/ai-scanner/stop', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        notify('error', data?.error || 'Failed to stop AI Scanner Bot.');
+      } else {
+        if (data?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(data.cloudBots);
+        notify('info', 'AI Scanner Bot stopped.');
+      }
+    } catch (err: any) {
+      notify('error', err?.message || 'Failed to stop AI Scanner Bot.');
+    }
+  }, [notify, onCloudBotsUpdate]);
 
   const startAutoTrade = useCallback(
     async (best: any) => {
@@ -1185,93 +1221,38 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
       }
       if (!best?.symbol) return;
 
-      autoTradingRef.current = true;
-      setIsAutoTrading(true);
-      setTpSlResult(null);
-
-      let stake = scannerSettings.stake;
-      let totalProfit = 0;
-      let lossStreak = 0;
-      let targetSymbol = best.symbol;
-      let targetDigit = best.digit ?? 5;
-
-      setCurrentAutoStake(stake);
-      setAutoSessionProfit(0);
-      setSymbol(targetSymbol);
-      notify('success', `AI Scanner Bot started on ${best.name || targetSymbol} (Differ ${targetDigit})`);
-
-      while (autoTradingRef.current) {
-        try {
-          const res = await fetch('/api/autobot/trade', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              symbol: targetSymbol,
-              contractType: 'digitdiff',
-              prediction: targetDigit,
-              stake,
-              duration: 1,
-              isVirtual: false,
-              strategyName: `AI Scanner (${targetSymbol} Differ ${targetDigit})`,
-            }),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || 'Scanner execution failed.');
-          if (!autoTradingRef.current) break;
-
-          const pnl = Number(data.profit || 0);
-          totalProfit += pnl;
-          setAutoSessionProfit(totalProfit);
-
-          if (totalProfit >= scannerSettings.tp) {
-            setTpSlResult({ type: 'tp', profit: totalProfit });
-            autoTradingRef.current = false;
-            setIsAutoTrading(false);
-            break;
-          }
-          if (totalProfit <= -scannerSettings.sl) {
-            setTpSlResult({ type: 'sl', profit: totalProfit });
-            autoTradingRef.current = false;
-            setIsAutoTrading(false);
-            break;
-          }
-
-          if (data.won) {
-            lossStreak = 0;
-            stake = scannerSettings.stake;
-            setCurrentAutoStake(stake);
-            if (marketSwitchMode === 'always') {
-              const nextSym = await runMarketScan(true, targetSymbol);
-              if (nextSym) {
-                targetSymbol = nextSym;
-                setSymbol(nextSym);
-              }
-            }
-          } else {
-            lossStreak += 1;
-            if (lossStreak >= scannerSettings.martingaleAfter) {
-              stake = Number((stake * scannerSettings.martingale).toFixed(2));
-              setCurrentAutoStake(stake);
-            }
-            if (marketSwitchMode === 'loss' || marketSwitchMode === 'always') {
-              const nextSym = await runMarketScan(true, targetSymbol);
-              if (nextSym) {
-                targetSymbol = nextSym;
-                setSymbol(nextSym);
-              }
-            }
-          }
-
-          await new Promise((r) => setTimeout(r, 150));
-        } catch (err: any) {
-          notify('error', err?.message || 'AI Scanner Bot error');
-          autoTradingRef.current = false;
-          setIsAutoTrading(false);
-          break;
+      try {
+        const res = await fetch('/api/cloud-bots/ai-scanner/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: best.symbol,
+            name: best.name || best.symbol,
+            digit: best.digit ?? 5,
+            stake: scannerSettings.stake,
+            martingale: scannerSettings.martingale,
+            martingaleAfter: scannerSettings.martingaleAfter,
+            tp: scannerSettings.tp,
+            sl: scannerSettings.sl,
+            marketSwitchMode,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          notify('error', data?.error || 'Failed to start AI Scanner Bot.');
+        } else {
+          if (data?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(data.cloudBots);
+          setSymbol(best.symbol);
+          notify(
+            'success',
+            `AI Scanner Bot started on ${best.name || best.symbol} (Differ ${best.digit ?? 5})`
+          );
         }
+      } catch (err: any) {
+        notify('error', err?.message || 'Failed to start AI Scanner Bot.');
       }
     },
-    [connected, marketSwitchMode, notify, runMarketScan, scannerSettings]
+    [connected, marketSwitchMode, notify, onCloudBotsUpdate, scannerSettings]
   );
 
   const loadBotFromSignal = useCallback(
@@ -1394,7 +1375,7 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
             >
               <Zap size={18} className="text-amber-300 animate-pulse" />
               <span>AI MARKET HACKER</span>
-              {hackerScanning && (
+              {(hackerScanning || cloudBots?.aiHacker?.running) && (
                 <span className="flex h-2 w-2 relative">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
@@ -1574,6 +1555,8 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
             onTriggerBackgroundRescan={(ex) => runMarketScan(true, ex)}
             onNotify={notify}
             hasVirtualToken={hasVirtualToken}
+            cloudState={cloudBots?.frequency}
+            onCloudBotsUpdate={onCloudBotsUpdate}
           />
         ) : layoutMode === 'grid' ? (
           <div className="space-y-4">
@@ -1588,6 +1571,8 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
                 isMultiMarketMode={true}
                 connected={connected}
                 hasVirtualToken={hasVirtualToken}
+                cloudState={cloudBots?.gridMaster}
+                onCloudBotsUpdate={onCloudBotsUpdate}
               />
             )}
 
@@ -1700,7 +1685,14 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
         scannerSettings={scannerSettings}
         scanBestMarket={scanBestMarket}
         tpSlResult={tpSlResult}
-        onCloseTpSlResult={() => setTpSlResult(null)}
+        onCloseTpSlResult={() => {
+          fetch('/api/cloud-bots/ai-scanner/clear-result', { method: 'POST' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (d?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(d.cloudBots);
+            })
+            .catch(() => {});
+        }}
       />
 
       {/* AI Market Hacker Modal */}
@@ -1709,6 +1701,8 @@ export const AnalysisPage: React.FC<AnalysisPageProps> = ({
         onClose={() => setShowHackerModal(false)}
         connected={connected}
         hasVirtualToken={hasVirtualToken}
+        cloudState={cloudBots?.aiHacker}
+        onCloudBotsUpdate={onCloudBotsUpdate}
         onScanningChange={setHackerScanning}
         onNotifyError={(msg) => notify('error', msg)}
       />

@@ -10,8 +10,8 @@ import {
   calculateTickStats,
   computeAccuNoiseSignal,
   computeAccumulatorSignal,
-} from './autobotSignals';
-import type { AccuNoiseSignal } from '../types/autobot';
+} from './autobotSignals.ts';
+import type { AccuNoiseSignal } from '../types/autobot.ts';
 
 export interface AutoBotMarketConfig {
   symbol: string;

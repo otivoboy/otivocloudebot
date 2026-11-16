@@ -25,6 +25,7 @@ import {
   TradeRecord,
   VirtualAccountInfo,
 } from './types';
+import type { CloudBotsSnapshot } from './types/cloudBots';
 
 type TerminalSubTab = 'terminal' | 'strategies' | 'ledger';
 
@@ -121,6 +122,7 @@ export default function App() {
   const [watchedMultiSymbols, setWatchedMultiSymbols] = useState<string[]>([]);
   const [positions, setPositions] = useState<OpenPosition[]>([]);
   const [lastClosedMtTrade, setLastClosedMtTrade] = useState<MtClosedTrade | null>(null);
+  const [cloudBots, setCloudBots] = useState<CloudBotsSnapshot | null>(null);
 
   const [actionError, setActionError] = useState<string | null>(null);
   const autoReconnectAttemptedRef = useRef(false);
@@ -254,6 +256,7 @@ export default function App() {
     if (snap.tickMarket) setTickMarket(snap.tickMarket);
     if (snap.multiTicks) setMultiTicks(snap.multiTicks);
     if (snap.positions) setPositions(snap.positions);
+    if (snap.cloudBots) setCloudBots(snap.cloudBots);
 
     // Only adopt server settings if client had no local saved settings yet
     if (!initialSettingsState.current.hadLocal && snap.settings) {
@@ -335,7 +338,26 @@ export default function App() {
     es.addEventListener('trade', (e) => {
       try {
         const record: TradeRecord = JSON.parse((e as MessageEvent).data);
-        setTrades((prev) => [record, ...prev].slice(0, 500));
+        setTrades((prev) =>
+          prev.some((t) => t.id === record.id) ? prev : [record, ...prev].slice(0, 500)
+        );
+        setActiveTrade((prev) => (prev?.id === record.id ? null : prev));
+      } catch {
+        // ignore
+      }
+    });
+
+    es.addEventListener('settings', (e) => {
+      try {
+        const next: BotSettings = JSON.parse((e as MessageEvent).data);
+        if (next && typeof next === 'object') {
+          setSettings(next);
+          try {
+            localStorage.setItem('otivo_bot_settings', JSON.stringify(next));
+          } catch {
+            // ignore
+          }
+        }
       } catch {
         // ignore
       }
@@ -438,7 +460,43 @@ export default function App() {
       }
     });
 
+    es.addEventListener('cloud_bots', (e) => {
+      try {
+        setCloudBots(JSON.parse((e as MessageEvent).data));
+      } catch {
+        // ignore
+      }
+    });
+
+    const syncSnapshot = () => {
+      fetch('/api/snapshot')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((snap) => {
+          if (snap) applySnapshot(snap);
+        })
+        .catch(() => {});
+    };
+
+    let hasOpenedOnce = false;
+    es.onopen = () => {
+      if (hasOpenedOnce) {
+        syncSnapshot();
+      }
+      hasOpenedOnce = true;
+    };
+
+    const handleOnline = () => syncSnapshot();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncSnapshot();
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
+      window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleVisibility);
       es.close();
     };
   }, []);
@@ -475,12 +533,16 @@ export default function App() {
 
   const startWithSettings = async (overrideSettings: BotSettings) => {
     setActionError(null);
-    handleSettingsChange(overrideSettings);
+    const mergedSettings: BotSettings = {
+      ...overrideSettings,
+      exec: settings.exec,
+    };
+    handleSettingsChange(mergedSettings);
     setRunPanelOpen(true);
     const res = await fetch('/api/session/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: overrideSettings }),
+      body: JSON.stringify({ settings: mergedSettings }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -728,6 +790,8 @@ export default function App() {
             accountBalance={account?.balance ?? 0}
             accountType={account?.accountType ?? 'DEMO'}
             hasVirtualToken={hasVirtualToken}
+            cloudAutoBot={cloudBots?.autobot}
+            onCloudBotsUpdate={setCloudBots}
             onSubscribeMarkets={handleSubscribeMultiMarkets}
             onStartWithSettings={startWithSettings}
             onStopTrading={handleStopTrading}
@@ -744,6 +808,8 @@ export default function App() {
             hasVirtualToken={hasVirtualToken}
             session={session}
             currentSettings={settings}
+            cloudBots={cloudBots}
+            onCloudBotsUpdate={setCloudBots}
             onSubscribeMarkets={handleSubscribeMultiMarkets}
             onLoadToTerminal={handleLoadStrategy}
             onStartWithSettings={startWithSettings}
@@ -786,6 +852,10 @@ export default function App() {
           currency={currency}
           connected={Boolean(account?.connected)}
           hasVirtualToken={hasVirtualToken}
+          showRunButton={activeTab === 'terminal'}
+          onToggleFastExec={(fast) =>
+            handleSettingsChange({ ...settings, exec: fast ? 'fast' : 'normal' })
+          }
           onStartTrading={handleStartTrading}
           onStopTrading={handleStopTrading}
           onResetStats={handleResetStats}

@@ -14,10 +14,12 @@ import {
 } from 'lucide-react';
 import {
   ActiveTrade,
+  AUTOBOT_MARKETS,
   BotSettings,
   ContractStage,
   LogEntry,
   MARKETS,
+  MT5_SYMBOLS,
   SessionStats,
   TradeRecord,
 } from '../types';
@@ -36,6 +38,8 @@ interface RunPanelProps {
   currency: string;
   connected: boolean;
   hasVirtualToken?: boolean;
+  showRunButton?: boolean;
+  onToggleFastExec?: (fast: boolean) => void;
   onStartTrading: () => void;
   onStopTrading: () => void;
   onResetStats: () => Promise<void>;
@@ -74,6 +78,21 @@ function formatGmtTimestamp(iso: string): string {
   return d.toISOString().replace('T', ' ').slice(0, 19) + ' GMT';
 }
 
+const SPOT_DECIMALS: Record<string, number> = {
+  ...Object.fromEntries(MT5_SYMBOLS.map((m) => [m.symbol, m.decimals])),
+  ...Object.fromEntries(AUTOBOT_MARKETS.map((m) => [m.symbol, m.decimals])),
+  ...Object.fromEntries(MARKETS.map((m) => [m.symbol, m.decimals])),
+};
+
+function formatSpot(spot: number | undefined | null, market: string): string {
+  if (spot === undefined || spot === null || !Number.isFinite(Number(spot))) {
+    return '—';
+  }
+  const num = Number(spot);
+  const decimals = SPOT_DECIMALS[market];
+  return decimals !== undefined ? num.toFixed(decimals) : String(num);
+}
+
 function readAutoResetPref(): boolean {
   try {
     return localStorage.getItem(AUTO_RESET_STORAGE_KEY) === 'true';
@@ -93,6 +112,8 @@ export const RunPanel: React.FC<RunPanelProps> = ({
   currency,
   connected,
   hasVirtualToken = false,
+  showRunButton = true,
+  onToggleFastExec,
   onStartTrading,
   onStopTrading,
   onResetStats,
@@ -110,12 +131,51 @@ export const RunPanel: React.FC<RunPanelProps> = ({
 
   const prevStatusRef = useRef<SessionStats['status']>(session.status);
   const prevTopTradeIdRef = useRef<string | null>(trades[0]?.id ?? null);
+  const knownRowIdsRef = useRef<Set<string> | null>(null);
+  const slideAnimatedIdsRef = useRef<Set<string>>(new Set());
 
+  const isFastExec = settings.exec === 'fast';
   const isRunning = session.status === 'running' || session.status === 'stopping';
   const isStopping = session.status === 'stopping';
   const clearDisabled =
     isRunning || (trades.length === 0 && logs.length === 0 && session.realTrades === 0);
   const stageStep = getStageProgress(session.contractStage);
+
+  const displayRows = useMemo(() => {
+    type DisplayRow =
+      | { kind: 'active'; id: string; trade: ActiveTrade }
+      | { kind: 'settled'; id: string; trade: TradeRecord };
+    const list: DisplayRow[] = [];
+    if (activeTrade && !trades.some((t) => t.id === activeTrade.id)) {
+      list.push({ kind: 'active', id: activeTrade.id, trade: activeTrade });
+    }
+    for (const t of trades.slice(0, 50)) {
+      list.push({ kind: 'settled', id: t.id, trade: t });
+    }
+    return list;
+  }, [activeTrade, trades]);
+
+  if (knownRowIdsRef.current === null) {
+    const initial = new Set<string>();
+    for (const row of displayRows) initial.add(row.id);
+    knownRowIdsRef.current = initial;
+  }
+
+  useEffect(() => {
+    const known = knownRowIdsRef.current;
+    if (!known) return;
+    if (displayRows.length === 0) {
+      known.clear();
+      slideAnimatedIdsRef.current.clear();
+      return;
+    }
+    for (const row of displayRows) {
+      if (!known.has(row.id)) {
+        known.add(row.id);
+        slideAnimatedIdsRef.current.add(row.id);
+      }
+    }
+  }, [displayRows]);
 
   // Flash Won / Lost briefly when a new trade settles
   useEffect(() => {
@@ -416,8 +476,17 @@ export const RunPanel: React.FC<RunPanelProps> = ({
         <div className="space-y-3.5">
           {isMobile && trades.length === 0 && !activeTrade && session.status === 'idle' && (
             <p className="py-4 text-center text-xs text-slate-300 leading-relaxed">
-              When you&apos;re ready to trade, hit <strong className="text-white">Run</strong>.
-              You&apos;ll be able to track your bot&apos;s performance here.
+              {showRunButton ? (
+                <>
+                  When you&apos;re ready to trade, hit <strong className="text-white">Run</strong>.
+                  You&apos;ll be able to track your bot&apos;s performance here.
+                </>
+              ) : (
+                <>
+                  Track live trades and journal updates here, or switch to{' '}
+                  <strong className="text-white">Terminal</strong> to run a Terminal strategy.
+                </>
+              )}
             </p>
           )}
 
@@ -535,104 +604,158 @@ export const RunPanel: React.FC<RunPanelProps> = ({
               </div>
 
               <div className="divide-y divide-[#1F2937]/70">
-                {/* Live Active / Purchasing Contract Row */}
-                {activeTrade && (
-                  <div className="py-2.5 text-xs bg-[#141A24]/60">
-                    <div className="grid grid-cols-12 items-center gap-1">
-                      <div className="col-span-4 flex items-center gap-2 min-w-0">
-                        <MarketLogo symbol={activeTrade.market} className="w-6 h-6 shrink-0" />
-                        <ContractIcon type={activeTrade.contractType} className="w-5 h-5 shrink-0" />
-                      </div>
+                {displayRows.map((row) => {
+                  const shouldSlide =
+                    slideAnimatedIdsRef.current.has(row.id) ||
+                    !(knownRowIdsRef.current?.has(row.id) ?? true);
 
-                      <div className="col-span-4 space-y-1 font-mono text-[11px] tabular-nums">
-                        <div className="flex items-center gap-1.5 text-slate-200">
-                          <span className="h-2 w-2 rounded-full bg-slate-200 shrink-0" />
-                          {activeTrade.entrySpot !== undefined ? (
-                            <span>{activeTrade.entrySpot}</span>
-                          ) : (
-                            <span className="h-2.5 w-12 rounded bg-slate-700 animate-pulse" />
+                  if (row.kind === 'active') {
+                    const liveTrade = row.trade;
+                    const hasEntry =
+                      liveTrade.entrySpot !== undefined &&
+                      Number.isFinite(Number(liveTrade.entrySpot));
+                    const hasCurrent =
+                      liveTrade.currentSpot !== undefined &&
+                      Number.isFinite(Number(liveTrade.currentSpot));
+                    const hasProfit =
+                      liveTrade.profit !== undefined &&
+                      Number.isFinite(Number(liveTrade.profit));
+
+                    return (
+                      <div
+                        key={row.id}
+                        className={shouldSlide ? 'runpanel-row-slide' : undefined}
+                      >
+                        <div className="runpanel-row-inner">
+                          <div className="py-2.5 text-xs bg-[#141A24]/60">
+                            <div className="grid grid-cols-12 items-center gap-1">
+                              <div className="col-span-4 flex items-center gap-2 min-w-0">
+                                <MarketLogo symbol={liveTrade.market} className="w-6 h-6 shrink-0" />
+                                <ContractIcon type={liveTrade.contractType} className="w-5 h-5 shrink-0" />
+                                {liveTrade.isVirtual && (
+                                  <span className="rounded bg-amber-500/15 px-1 py-0.5 font-mono text-[9px] font-semibold text-amber-400">
+                                    V
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="col-span-4 space-y-1 font-mono text-[11px] tabular-nums">
+                                <div className="flex items-center gap-1.5 text-slate-200">
+                                  <span className="h-2 w-2 rounded-full bg-[#ff444f] shrink-0" />
+                                  {hasEntry ? (
+                                    <span>{formatSpot(liveTrade.entrySpot, liveTrade.market)}</span>
+                                  ) : (
+                                    <span className="h-2.5 w-12 rounded bg-slate-700 animate-pulse" />
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5 text-slate-300">
+                                  <span className="h-2 w-2 rounded-full border-[1.5px] border-slate-400 shrink-0" />
+                                  {hasCurrent ? (
+                                    <span>{formatSpot(liveTrade.currentSpot, liveTrade.market)}</span>
+                                  ) : (
+                                    <span className="h-2.5 w-12 rounded bg-slate-700/80 animate-pulse" />
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="col-span-4 text-right space-y-1 font-mono text-[11px] tabular-nums">
+                                <div className="text-slate-200">
+                                  {liveTrade.stake.toFixed(2)} {liveTrade.currency}
+                                </div>
+                                {hasProfit ? (
+                                  <div
+                                    className={`font-semibold ${
+                                      Number(liveTrade.profit) >= 0
+                                        ? 'text-[#00a79e]'
+                                        : 'text-[#ff444f]'
+                                    }`}
+                                  >
+                                    {Number(liveTrade.profit) >= 0 ? '+' : ''}
+                                    {Number(liveTrade.profit).toFixed(2)} {liveTrade.currency}
+                                  </div>
+                                ) : (
+                                  <div className="flex justify-end">
+                                    <span className="h-2.5 w-14 rounded bg-[#00a79e]/30 animate-pulse" />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {viewDetail && (
+                              <div className="mt-1.5 rounded bg-[#0B0F17] px-2.5 py-1.5 font-mono text-[10px] text-slate-400 flex flex-wrap justify-between gap-2">
+                                <span>
+                                  {liveTrade.label} · ID: {liveTrade.contractIds.join(', ')}
+                                </span>
+                                <span>{liveTrade.ticks}t · Open</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const t = row.trade;
+                  return (
+                    <div
+                      key={row.id}
+                      className={shouldSlide ? 'runpanel-row-slide' : undefined}
+                    >
+                      <div className="runpanel-row-inner">
+                        <div className="py-2.5 text-xs">
+                          <div className="grid grid-cols-12 items-center gap-1">
+                            <div className="col-span-4 flex items-center gap-2 min-w-0">
+                              <MarketLogo symbol={t.market} className="w-6 h-6 shrink-0" />
+                              <ContractIcon type={t.contractType} className="w-5 h-5 shrink-0" />
+                              {t.isVirtual && (
+                                <span className="rounded bg-amber-500/15 px-1 py-0.5 font-mono text-[9px] font-semibold text-amber-400">
+                                  V
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="col-span-4 space-y-1 font-mono text-[11px] tabular-nums">
+                              <div className="flex items-center gap-1.5 text-slate-200">
+                                <span className="h-2 w-2 rounded-full bg-[#ff444f] shrink-0" />
+                                <span>{formatSpot(t.entrySpot, t.market)}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-slate-300">
+                                <span className="h-2 w-2 rounded-full border-[1.5px] border-slate-400 shrink-0" />
+                                <span>{formatSpot(t.exitSpot, t.market)}</span>
+                              </div>
+                            </div>
+
+                            <div className="col-span-4 text-right space-y-1 font-mono text-[11px] tabular-nums">
+                              <div className="text-slate-200">
+                                {t.stake.toFixed(2)} {t.currency}
+                              </div>
+                              <div
+                                className={`font-semibold ${
+                                  t.won ? 'text-[#00a79e]' : 'text-[#ff444f]'
+                                }`}
+                              >
+                                {t.profit >= 0 ? '+' : ''}
+                                {t.profit.toFixed(2)} {t.currency}
+                              </div>
+                            </div>
+                          </div>
+
+                          {viewDetail && (
+                            <div className="mt-1.5 rounded bg-[#0B0F17] px-2.5 py-1.5 font-mono text-[10px] text-slate-400 flex flex-wrap justify-between gap-2">
+                              <span>
+                                {t.label} · {t.isVirtual ? 'VIRTUAL' : `#${t.seq}`} · ID:{' '}
+                                {t.contractIds.join(', ')}
+                              </span>
+                              <span>
+                                {t.ticks}t · {formatGmtTimestamp(t.timestamp)}
+                              </span>
+                            </div>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5 text-slate-400">
-                          <span className="h-2 w-2 rounded-full border-[1.5px] border-slate-400 shrink-0" />
-                          <span className="h-2.5 w-12 rounded bg-slate-700/80 animate-pulse" />
-                        </div>
-                      </div>
-
-                      <div className="col-span-4 text-right space-y-1 font-mono text-[11px] tabular-nums">
-                        <div className="text-slate-200">
-                          {activeTrade.stake.toFixed(2)} {activeTrade.currency}
-                        </div>
-                        <div className="flex justify-end">
-                          <span className="h-2.5 w-14 rounded bg-[#00a79e]/30 animate-pulse" />
-                        </div>
                       </div>
                     </div>
-
-                    {viewDetail && (
-                      <div className="mt-1.5 rounded bg-[#0B0F17] px-2.5 py-1.5 font-mono text-[10px] text-slate-400 flex flex-wrap justify-between gap-2">
-                        <span>
-                          {activeTrade.label} · ID: {activeTrade.contractIds.join(', ')}
-                        </span>
-                        <span>{activeTrade.ticks}t · Open</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Settled Contract Rows */}
-                {trades.slice(0, 50).map((t) => (
-                  <div key={t.id} className="py-2.5 text-xs">
-                    <div className="grid grid-cols-12 items-center gap-1">
-                      <div className="col-span-4 flex items-center gap-2 min-w-0">
-                        <MarketLogo symbol={t.market} className="w-6 h-6 shrink-0" />
-                        <ContractIcon type={t.contractType} className="w-5 h-5 shrink-0" />
-                        {t.isVirtual && (
-                          <span className="rounded bg-amber-500/15 px-1 py-0.5 font-mono text-[9px] font-semibold text-amber-400">
-                            V
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="col-span-4 space-y-1 font-mono text-[11px] tabular-nums">
-                        <div className="flex items-center gap-1.5 text-slate-200">
-                          <span className="h-2 w-2 rounded-full bg-slate-200 shrink-0" />
-                          <span>{t.entrySpot !== undefined ? t.entrySpot : '—'}</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-slate-300">
-                          <span className="h-2 w-2 rounded-full border-[1.5px] border-slate-400 shrink-0" />
-                          <span>{t.exitSpot !== undefined ? t.exitSpot : '—'}</span>
-                        </div>
-                      </div>
-
-                      <div className="col-span-4 text-right space-y-1 font-mono text-[11px] tabular-nums">
-                        <div className="text-slate-200">
-                          {t.stake.toFixed(2)} {t.currency}
-                        </div>
-                        <div
-                          className={`font-semibold ${
-                            t.won ? 'text-[#00a79e]' : 'text-[#ff444f]'
-                          }`}
-                        >
-                          {t.profit >= 0 ? '+' : ''}
-                          {t.profit.toFixed(2)} {t.currency}
-                        </div>
-                      </div>
-                    </div>
-
-                    {viewDetail && (
-                      <div className="mt-1.5 rounded bg-[#0B0F17] px-2.5 py-1.5 font-mono text-[10px] text-slate-400 flex flex-wrap justify-between gap-2">
-                        <span>
-                          {t.label} · {t.isVirtual ? 'VIRTUAL' : `#${t.seq}`} · ID:{' '}
-                          {t.contractIds.join(', ')}
-                        </span>
-                        <span>
-                          {t.ticks}t · {formatGmtTimestamp(t.timestamp)}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -797,7 +920,7 @@ export const RunPanel: React.FC<RunPanelProps> = ({
           {/* Top Run / Stop + Status Box + Contract Stage Progress */}
           <div className="border-b border-[#1F2937] bg-[#131820] p-3.5 shrink-0">
             <div className="flex items-center gap-2.5">
-              {renderRunButton()}
+              {showRunButton && renderRunButton()}
               {renderStageProgress(true)}
               <button
                 type="button"
@@ -838,9 +961,47 @@ export const RunPanel: React.FC<RunPanelProps> = ({
             {renderTabContent(false)}
           </div>
 
-          {/* Pinned Bottom Statistics Grid, Auto Reset Toggle & Reset Button */}
+          {/* Pinned Bottom Statistics Grid, Speed Switch, Auto Reset Toggle & Reset Button */}
           <div className="border-t border-[#1F2937] bg-[#131820] p-3.5 space-y-3 shrink-0">
             {renderStatsGrid()}
+
+            <div className="flex items-center justify-between border-t border-[#1F2937] pt-2.5">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                  Speed
+                </span>
+                <span
+                  className={`font-mono text-[10px] font-semibold uppercase ${
+                    isFastExec ? 'text-[#00a79e]' : 'text-slate-400'
+                  }`}
+                >
+                  {isFastExec ? 'Fast' : 'Normal'}
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isFastExec}
+                aria-label="Toggle fast execution speed"
+                title={
+                  isFastExec
+                    ? 'Fast execution ON (applies to bots on all pages)'
+                    : 'Normal execution speed (switch on for Fast)'
+                }
+                onClick={() => onToggleFastExec?.(!isFastExec)}
+                className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors ${
+                  isFastExec
+                    ? 'border-[#00a79e] bg-[#00a79e]'
+                    : 'border-[#2A313D] bg-[#0B0F17]'
+                }`}
+              >
+                <span
+                  className={`inline-block h-2.5 w-2.5 rounded-full bg-white transition-transform ${
+                    isFastExec ? 'translate-x-3.5' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
 
             <div className="flex items-center justify-between border-t border-[#1F2937] pt-2.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
@@ -885,13 +1046,39 @@ export const RunPanel: React.FC<RunPanelProps> = ({
             role="region"
             aria-label="Mobile Run Panel"
           >
-            {/* Drag / Collapse Handle + Reset Button */}
-            <div className="relative flex items-center justify-end border-b border-[#1F2937] bg-[#131820] px-3 py-2.5">
+            {/* Drag / Collapse Handle + Speed Toggle + Reset Button */}
+            <div className="relative flex items-center justify-between border-b border-[#1F2937] bg-[#131820] px-3 py-2.5">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isFastExec}
+                aria-label="Toggle fast execution speed"
+                onClick={() => onToggleFastExec?.(!isFastExec)}
+                className="relative z-10 flex items-center gap-1.5 rounded border border-[#2A313D] bg-[#181E29] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300 hover:bg-[#1F2633]"
+              >
+                <span className={isFastExec ? 'text-[#00a79e]' : 'text-slate-400'}>
+                  {isFastExec ? 'Fast' : 'Norm'}
+                </span>
+                <span
+                  className={`relative inline-flex h-3.5 w-6 shrink-0 items-center rounded-full border transition-colors ${
+                    isFastExec
+                      ? 'border-[#00a79e] bg-[#00a79e]'
+                      : 'border-[#2A313D] bg-[#0B0F17]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-2 w-2 rounded-full bg-white transition-transform ${
+                      isFastExec ? 'translate-x-3' : 'translate-x-0.5'
+                    }`}
+                  />
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setMobileExpanded(false)}
                 aria-label="Collapse Run Panel"
-                className="absolute inset-x-16 inset-y-0 flex items-center justify-center text-slate-300 hover:text-white"
+                className="absolute inset-x-24 inset-y-0 flex items-center justify-center text-slate-300 hover:text-white"
               >
                 <ChevronDown className="h-5 w-5" />
               </button>
@@ -937,7 +1124,7 @@ export const RunPanel: React.FC<RunPanelProps> = ({
             <div className="border-t border-[#1F2937] bg-[#131820] px-3.5 pt-2.5 pb-3 space-y-3 shrink-0">
               {renderStatsGrid()}
               <div className="flex items-center gap-3 border-t border-[#1F2937] pt-2.5">
-                {renderRunButton()}
+                {showRunButton && renderRunButton()}
                 {renderStageProgress(false)}
               </div>
             </div>
@@ -970,8 +1157,8 @@ export const RunPanel: React.FC<RunPanelProps> = ({
                 </span>
               </div>
             )}
-            <div className="flex items-center gap-3">
-              {renderRunButton()}
+            <div className="flex items-center gap-2.5">
+              {showRunButton && renderRunButton()}
               <button
                 type="button"
                 onClick={() => setMobileExpanded(true)}
@@ -980,6 +1167,32 @@ export const RunPanel: React.FC<RunPanelProps> = ({
               >
                 {renderStageProgress(false)}
                 <ChevronUp className="h-4 w-4 text-slate-400 shrink-0" />
+              </button>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isFastExec}
+                aria-label="Toggle fast execution speed"
+                onClick={() => onToggleFastExec?.(!isFastExec)}
+                className="flex items-center gap-1 rounded border border-[#2A313D] bg-[#181E29] px-1.5 py-1 text-[9px] font-semibold uppercase tracking-wide shrink-0"
+                title={isFastExec ? 'Fast Execution ON' : 'Normal Execution Speed'}
+              >
+                <span className={isFastExec ? 'text-[#00a79e]' : 'text-slate-400'}>
+                  {isFastExec ? 'Fast' : 'Norm'}
+                </span>
+                <span
+                  className={`relative inline-flex h-3 w-5 shrink-0 items-center rounded-full border transition-colors ${
+                    isFastExec
+                      ? 'border-[#00a79e] bg-[#00a79e]'
+                      : 'border-[#2A313D] bg-[#0B0F17]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-1.5 w-1.5 rounded-full bg-white transition-transform ${
+                      isFastExec ? 'translate-x-2.5' : 'translate-x-0.5'
+                    }`}
+                  />
+                </span>
               </button>
             </div>
           </div>

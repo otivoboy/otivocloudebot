@@ -188,3 +188,35 @@
   z-index: 2;
   font-family: sans-serif;
 }
+
+/* --- Run Panel Sliding Contract Row Animation --- */
+@keyframes runpanel-slide-down {
+  0% {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+  100% {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+
+@keyframes runpanel-row-enter {
+  0% {
+    transform: translateY(-10px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.runpanel-row-slide {
+  display: grid;
+  animation: runpanel-slide-down 240ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.runpanel-row-slide > .runpanel-row-inner {
+  min-height: 0;
+  overflow: hidden;
+  animation: runpanel-row-enter 240ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}

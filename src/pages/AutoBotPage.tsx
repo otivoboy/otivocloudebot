@@ -1,11 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
-  AlertTriangle,
-  CheckCircle2,
   CheckSquare,
   ChevronRight,
-  Info,
   Play,
   Radio,
   RotateCcw,
@@ -14,7 +11,6 @@ import {
   Square as SquareIcon,
   Target,
   Trash2,
-  X,
   Zap,
 } from 'lucide-react';
 import {
@@ -34,18 +30,19 @@ import {
   evaluatePriceDigitsSignal,
 } from '../lib/autobotEngines';
 import {
-  computeAccumulatorSignal,
   computeDiffersCalmNoiseSignal,
   computeDiffersSignal,
-  computeMatchSignal,
-  computeOverUnderSignal,
 } from '../lib/autobotSignals';
 import {
   AutoBotAlarm,
   AutoBotContractType,
-  AutoBotSignalQueueItem,
   StreakMode,
 } from '../types/autobot';
+import type {
+  AutoBotCloudConfig,
+  AutoBotCloudState,
+  CloudBotsSnapshot,
+} from '../types/cloudBots';
 import { AutoBotAlarmScheduler } from '../components/autobot/AutoBotAlarmScheduler';
 import { AutoBotMarketCard, AutoBotTickCardData } from '../components/autobot/AutoBotMarketCard';
 import { AutoBotAnalysisSignalsPanel } from '../components/autobot/AutoBotAnalysisSignalsPanel';
@@ -63,12 +60,8 @@ interface AutoBotPageProps {
   onStartWithSettings: (settings: BotSettings) => Promise<void>;
   onStopTrading: () => Promise<void>;
   onLoadToTerminal: (settings: BotSettings) => void;
-}
-
-interface ToastItem {
-  id: number;
-  type: 'info' | 'success' | 'error' | 'warn';
-  message: string;
+  cloudAutoBot?: AutoBotCloudState;
+  onCloudBotsUpdate?: (snap: CloudBotsSnapshot) => void;
 }
 
 interface NeuralSignalChip {
@@ -213,9 +206,11 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
   accountBalance,
   hasVirtualToken,
   onSubscribeMarkets,
+  cloudAutoBot,
+  onCloudBotsUpdate,
 }) => {
   const [isSettingsExpanded, setIsSettingsExpanded] = useState(true);
-  const [isRunning, setIsRunning] = useState(false);
+  const isRunning = Boolean(cloudAutoBot?.running);
 
   // Core strategy config
   const [contractType, setContractTypeState] = useState<AutoBotContractType>(() =>
@@ -542,11 +537,12 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
   const [virtualLossThreshold, setVirtualLossThreshold] = useState(() =>
     parseInt(localStorage.getItem('autobot_virtual_loss_threshold') || '2', 10)
   );
-  const [virtualWinsCount, setVirtualWinsCount] = useState(0);
-  const [virtualLossesCount, setVirtualLossesCount] = useState(0);
-  const [consecutiveVirtualLosses, setConsecutiveVirtualLosses] = useState(0);
-  const [lockedVirtualMarket, setLockedVirtualMarket] = useState<string | null>(null);
-  const [isCurrentTradeReal, setIsCurrentTradeReal] = useState(false);
+  const virtualWinsCount = cloudAutoBot?.virtualWins ?? 0;
+  const virtualLossesCount = cloudAutoBot?.virtualLosses ?? 0;
+  const consecutiveVirtualLosses = cloudAutoBot?.consecVirtualLosses ?? 0;
+  const lockedVirtualMarket = cloudAutoBot?.lockedVirtualMarket ?? null;
+  const isCurrentTradeReal =
+    cloudAutoBot?.isCurrentTradeReal ?? !(hasVirtualToken && useVirtualLoss && !virtualAfterRealLoss);
 
   // Profit / Risk / Runs / Auto-Restart
   const [isRunsLimitEnabled, setIsRunsLimitEnabled] = useState(
@@ -591,19 +587,15 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
     return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
   });
 
-  // Live trading metrics & logs
-  const [sessionProfit, setSessionProfit] = useState(0);
-  const [cumulativeSessionProfit, setCumulativeSessionProfit] = useState(() =>
-    parseFloat(sessionStorage.getItem('autobot_cumulativeSessionProfit') || '0')
-  );
-  const [winsCount, setWinsCount] = useState(0);
-  const [lossesCount, setLossesCount] = useState(0);
-  const [consecLosses, setConsecLosses] = useState(0);
-  const [currentStake, setCurrentStake] = useState(stake);
-  const [lostPatternsState, setLostPatternsState] = useState<string[]>([]);
-  const [otivoLog, setOtivoLog] = useState<string[]>([]);
+  // Live trading metrics & logs (derived from cloud server)
+  const sessionProfit = cloudAutoBot?.sessionProfit ?? 0;
+  const cumulativeSessionProfit = cloudAutoBot?.cumulativeProfit ?? 0;
+  const winsCount = cloudAutoBot?.wins ?? 0;
+  const lossesCount = cloudAutoBot?.losses ?? 0;
+  const consecLosses = cloudAutoBot?.consecLosses ?? 0;
+  const lostPatternsState = cloudAutoBot?.lostPatterns ?? [];
+  const otivoLog = cloudAutoBot?.logs ?? [];
   const [neuralSignals, setNeuralSignals] = useState<NeuralSignalChip[]>([]);
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   // Live ticks state
   const [marketTicks, setMarketTicks] = useState<Record<string, AutoBotTickCardData>>({});
@@ -611,22 +603,17 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
   // Effective virtual mode strictly gated on Virtual API / PAT Token presence
   const effectiveUseVirtualLoss = hasVirtualToken && useVirtualLoss;
 
-  // Enforce virtual mode off if token is disconnected or absent
-  useEffect(() => {
-    if (!hasVirtualToken) {
-      lockedVirtualMarketRef.current = null;
-      setLockedVirtualMarket(null);
-      setIsCurrentTradeReal(true);
-    }
-  }, [hasVirtualToken]);
-
-  const notify = useCallback((type: ToastItem['type'], message: string) => {
-    const id = Date.now() + Math.floor(Math.random() * 1000);
-    setToasts((prev) => [{ id, type, message }, ...prev].slice(0, 4));
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 5000);
-  }, []);
+  const notify = useCallback(
+    (type: 'info' | 'success' | 'error' | 'warn', message: string) => {
+      const level = type === 'success' ? 'win' : type;
+      fetch('/api/journal/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level, message: `AutoBot: ${message}` }),
+      }).catch(() => {});
+    },
+    []
+  );
 
   // Auto-stake calculation
   const autoStakeValue = useMemo(() => {
@@ -756,36 +743,66 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
   const isRunningRef = useRef(isRunning);
   isRunningRef.current = isRunning;
 
-  const signalQueueRef = useRef<AutoBotSignalQueueItem[]>([]);
-  const tradeInFlightRef = useRef(false);
-
-  const sessionProfitRef = useRef(sessionProfit);
-  sessionProfitRef.current = sessionProfit;
-  const cumulativeSessionProfitRef = useRef(cumulativeSessionProfit);
-  cumulativeSessionProfitRef.current = cumulativeSessionProfit;
-  const winsCountRef = useRef(winsCount);
-  winsCountRef.current = winsCount;
-  const lossesCountRef = useRef(lossesCount);
-  lossesCountRef.current = lossesCount;
   const consecLossesRef = useRef(consecLosses);
   consecLossesRef.current = consecLosses;
-  const consecVirtualLossesRef = useRef(consecutiveVirtualLosses);
-  consecVirtualLossesRef.current = consecutiveVirtualLosses;
-  const lockedVirtualMarketRef = useRef<string | null>(lockedVirtualMarket);
-  lockedVirtualMarketRef.current = lockedVirtualMarket;
-  const continuousLockedMarketRef = useRef<string | null>(null);
-  const lastLostMarketRef = useRef<string | null>(null);
-  const lastLossTimeRef = useRef<number>(0);
   const lostPatternsRef = useRef<string[]>(lostPatternsState);
   lostPatternsRef.current = lostPatternsState;
-  const currentStakeRef = useRef<number>(effectiveBaseStake);
+
+  const currentStake = isRunning
+    ? (cloudAutoBot?.currentStake ?? effectiveBaseStake)
+    : effectiveBaseStake;
+
+  // Cloud server writes lifecycle/TP/SL/error notices directly to Run Panel -> Journal
 
   useEffect(() => {
-    if (!isRunning) {
-      setCurrentStake(effectiveBaseStake);
-      currentStakeRef.current = effectiveBaseStake;
+    if (
+      cloudAutoBot?.running &&
+      cloudAutoBot.customPattern &&
+      cloudAutoBot.customPattern !== customPattern
+    ) {
+      setCustomPattern(cloudAutoBot.customPattern);
     }
-  }, [effectiveBaseStake, isRunning]);
+    if (
+      cloudAutoBot?.running &&
+      cloudAutoBot.patternSmartDigit !== undefined &&
+      cloudAutoBot.patternSmartDigit !== patternSmartDigit
+    ) {
+      setPatternSmartDigit(cloudAutoBot.patternSmartDigit);
+    }
+  }, [
+    cloudAutoBot?.running,
+    cloudAutoBot?.customPattern,
+    cloudAutoBot?.patternSmartDigit,
+    customPattern,
+    patternSmartDigit,
+  ]);
+
+  useEffect(() => {
+    if (cloudAutoBot && !cloudAutoBot.running && autoRestartAfterTp && cloudAutoBot.autoRestartAfterTp === false) {
+      setAutoRestartAfterTp(false);
+    }
+  }, [cloudAutoBot, autoRestartAfterTp]);
+
+  const syncingFromCloudRef = useRef(false);
+  useEffect(() => {
+    if (!cloudAutoBot?.alarms?.length) return;
+    setAlarms((prev) => {
+      let changed = false;
+      const next = prev.map((localAlarm) => {
+        const remote = cloudAutoBot.alarms.find((ra) => ra.id === localAlarm.id);
+        if (remote && remote.triggeredToday && remote.triggeredToday !== localAlarm.triggeredToday) {
+          changed = true;
+          return { ...localAlarm, triggeredToday: remote.triggeredToday };
+        }
+        return localAlarm;
+      });
+      if (changed) {
+        syncingFromCloudRef.current = true;
+        return next;
+      }
+      return prev;
+    });
+  }, [cloudAutoBot?.alarms]);
 
   // Config refs
   const contractTypeRef = useRef(contractType);
@@ -954,34 +971,6 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
   alternateMarketRecoveryRef.current = alternateMarketRecovery;
   const checkedMarketsRef = useRef(checkedMarkets);
   checkedMarketsRef.current = checkedMarkets;
-  const effectiveBaseStakeRef = useRef(effectiveBaseStake);
-  effectiveBaseStakeRef.current = effectiveBaseStake;
-  const martingaleRef = useRef(martingale);
-  martingaleRef.current = martingale;
-  const effectiveUseVirtualLossRef = useRef(effectiveUseVirtualLoss);
-  effectiveUseVirtualLossRef.current = effectiveUseVirtualLoss;
-  const virtualAfterRealLossRef = useRef(virtualAfterRealLoss);
-  virtualAfterRealLossRef.current = virtualAfterRealLoss;
-  const virtualLossThresholdRef = useRef(virtualLossThreshold);
-  virtualLossThresholdRef.current = virtualLossThreshold;
-  const isRunsLimitEnabledRef = useRef(isRunsLimitEnabled);
-  isRunsLimitEnabledRef.current = isRunsLimitEnabled;
-  const runsLimitRef = useRef(runsLimit);
-  runsLimitRef.current = runsLimit;
-  const takeProfitRef = useRef(takeProfit);
-  takeProfitRef.current = takeProfit;
-  const stopLossRef = useRef(stopLoss);
-  stopLossRef.current = stopLoss;
-  const runForeverRef = useRef(runForever);
-  runForeverRef.current = runForever;
-  const autoRestartAfterTpRef = useRef(autoRestartAfterTp);
-  autoRestartAfterTpRef.current = autoRestartAfterTp;
-  const autoRestartMaxTpRef = useRef(autoRestartMaxTp);
-  autoRestartMaxTpRef.current = autoRestartMaxTp;
-  const isCurrentTradeRealRef = useRef(isCurrentTradeReal);
-  isCurrentTradeRealRef.current = isCurrentTradeReal;
-  const accountBalanceRef = useRef(accountBalance);
-  accountBalanceRef.current = accountBalance;
 
   const visibleCheckedMarkets = useMemo(
     () => checkedMarkets.filter((m) => ALL_AUTOBOT_SYMBOLS.includes(m)),
@@ -995,79 +984,142 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
     }
   }, [visibleCheckedMarkets.join(',')]);
 
-  const appendLog = useCallback((msg: string) => {
-    const formatted = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    setOtivoLog((prev) => [formatted, ...prev].slice(0, 60));
-  }, []);
+  const buildCloudConfig = (alarmsOverride?: AutoBotAlarm[]): AutoBotCloudConfig => ({
+    contractType,
+    targetDigit,
+    targetDigit2,
+    streakThreshold,
+    isLossStreakThresholdEnabled,
+    lossStreakThreshold,
+    streakMode,
+    priceDigitsInput,
+    ouSamplePeriod,
+    ouColdThresholdMax,
+    ouSingleDigitMax,
+    isEdmsEnabled,
+    ouPatternSelection,
+    analysisOppositeSignalEnabled,
+    isRecoveryStreakModeEnabled,
+    recoveryStreakMode,
+    recoveryContractType,
+    recoveryTargetDigit,
+    recoveryAccumulatorGrowthRate,
+    recoveryAccumulatorTakeProfit,
+    recoveryOuPatternSelection,
+    recoveryPriceDigitsInput,
+    recoveryCustomPattern,
+    recoveryStreakThreshold,
+    recoveryIsLossStreakThresholdEnabled,
+    recoveryLossStreakThreshold,
+    recoveryPercentageThreshold,
+    recoveryIsExactPercentage,
+    recoveryTypesTransitionMatrix,
+    recoveryTypesMirrorDigitReversal,
+    recoveryTypesTickCompression,
+    recoveryTypesHiddenCycleLength,
+    recoveryPatternSmartMode,
+    recoveryPatternRotationalMode,
+    recoveryPatternRecoveryMode,
+    recoveryPatternSmartDigit,
+    recoveryAnalysisOppositeSignalEnabled,
+    recoveryConsecTouchOpposingTicks,
+    recoveryConsecTouchTargetDigits,
+    recoveryConsecTouchTouchType,
+    percentageThreshold,
+    isExactPercentage,
+    isCirclesMode,
+    circlesTicksLimit,
+    circleEntryModeEnabled,
+    circleTargetPct,
+    circleCompareMode,
+    circleFilterDigits,
+    circleOuTargetType,
+    circleOuDigit,
+    circleOuMaxPct,
+    circleOuLowDigits,
+    circleOuLowTouchMode,
+    circleOuOverTouchCount,
+    circleOuFinalTouchMaxTicks,
+    consecTouchOpposingTicks,
+    consecTouchTargetDigits,
+    consecTouchTouchType,
+    pmfPatternLen,
+    pmfMinOccurrences,
+    pmfFollowerLen,
+    tradeDuration,
+    isRandomTicks,
+    accumulatorGrowthRate,
+    accumulatorTakeProfit,
+    accuStrategies,
+    differsNoiseMaxScore,
+    differsNoiseMinCalmTicks,
+    differsNoiseTargetMode,
+    customPattern,
+    typesTransitionMatrix,
+    typesMirrorDigitReversal,
+    typesTickCompression,
+    typesHiddenCycleLength,
+    patternSmartMode,
+    patternSmartDigit,
+    patternRotationalMode,
+    patternRecoveryMode,
+    isContinuousTrading,
+    alternateMarketRecovery,
+    checkedMarkets,
+    stake,
+    isAutoStakeEnabled,
+    martingale,
+    useVirtualLoss: Boolean(hasVirtualToken && useVirtualLoss),
+    virtualAfterRealLoss,
+    virtualLossThreshold,
+    isRunsLimitEnabled,
+    runsLimit,
+    takeProfit,
+    stopLoss,
+    runForever,
+    autoRestartAfterTp,
+    autoRestartMaxTp,
+    alarms: alarmsOverride ?? alarms,
+    isAlarmSchedulerEnabled,
+    timezoneOffsetMinutes: new Date().getTimezoneOffset(),
+  });
 
-  // Pattern Learning Engine
-  const runPatternLearning = useCallback(
-    (excludePattern?: string, excludeDigit?: number) => {
-      const symbols = checkedMarketsRef.current;
-      if (symbols.length === 0) return null;
+  const buildCloudConfigRef = useRef(buildCloudConfig);
+  buildCloudConfigRef.current = buildCloudConfig;
 
-      const patternMap: Record<
-        string,
-        { pattern: string; appearingSymbols: Set<string>; digitCounts: number[]; totalCount: number }
-      > = {};
+  const hasMountedConfigSyncRef = useRef(false);
+  const configSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const configSignature = JSON.stringify(buildCloudConfig());
 
-      symbols.forEach((symbol) => {
-        const history = tickHistories.current[symbol] || [];
-        if (history.length < 10) return;
-        for (let i = 0; i <= history.length - 4; i++) {
-          const patternStr = history.slice(i, i + 3).join('');
-          const nextDigit = history[i + 3];
-          if (!patternMap[patternStr]) {
-            patternMap[patternStr] = {
-              pattern: patternStr,
-              appearingSymbols: new Set<string>(),
-              digitCounts: Array(10).fill(0),
-              totalCount: 0,
-            };
-          }
-          patternMap[patternStr].appearingSymbols.add(symbol);
-          patternMap[patternStr].digitCounts[nextDigit]++;
-          patternMap[patternStr].totalCount++;
-        }
-      });
+  useEffect(() => {
+    if (!hasMountedConfigSyncRef.current) {
+      hasMountedConfigSyncRef.current = true;
+      return;
+    }
+    if (syncingFromCloudRef.current) {
+      syncingFromCloudRef.current = false;
+      return;
+    }
+    if (isRunning) return;
+    if (configSyncTimerRef.current) clearTimeout(configSyncTimerRef.current);
+    configSyncTimerRef.current = setTimeout(() => {
+      fetch('/api/cloud-bots/autobot/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCloudConfigRef.current()),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(d.cloudBots);
+        })
+        .catch(() => {});
+    }, 350);
+    return () => {
+      if (configSyncTimerRef.current) clearTimeout(configSyncTimerRef.current);
+    };
+  }, [configSignature, isRunning, onCloudBotsUpdate]);
 
-      const candidates: Array<{ pattern: string; digit: number; score: number }> = [];
-      Object.keys(patternMap).forEach((patternStr) => {
-        const stats = patternMap[patternStr];
-        if (stats.totalCount < 1) return;
-        const marketsCount = stats.appearingSymbols.size;
-        for (let d = 0; d <= 9; d++) {
-          if (
-            excludePattern &&
-            excludeDigit !== undefined &&
-            patternStr === excludePattern &&
-            d === excludeDigit
-          ) {
-            continue;
-          }
-          const count = stats.digitCounts[d];
-          const absenceRate = 1.0 - count / stats.totalCount;
-          let score = stats.totalCount * absenceRate;
-          if (count === 0) score += 15000;
-          score += marketsCount > 3 ? 25000 + marketsCount * 2000 : marketsCount * 2000;
-          if (patternStr.length === 3) score += 100;
-          candidates.push({ pattern: patternStr, digit: d, score });
-        }
-      });
-
-      if (candidates.length === 0) {
-        return {
-          pattern: customPatternRef.current || '686',
-          digit: patternSmartDigitRef.current ?? 5,
-        };
-      }
-      candidates.sort((a, b) => b.score - a.score);
-      return { pattern: candidates[0].pattern, digit: candidates[0].digit };
-    },
-    []
-  );
-
-  const handleStartBot = useCallback(() => {
+  const handleStartBot = useCallback(async () => {
     if (!connected) {
       notify('error', 'Connect your Deriv Real or Demo API token first in Settings.');
       return;
@@ -1076,103 +1128,55 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
       notify('error', 'Select at least one market to monitor.');
       return;
     }
-    signalQueueRef.current = [];
-    continuousLockedMarketRef.current = null;
-    lockedVirtualMarketRef.current = null;
-    setLockedVirtualMarket(null);
-    lastLostMarketRef.current = null;
-    lastLossTimeRef.current = 0;
-
-    if (!effectiveUseVirtualLossRef.current || virtualAfterRealLossRef.current) {
-      isCurrentTradeRealRef.current = true;
-      setIsCurrentTradeReal(true);
-    } else {
-      isCurrentTradeRealRef.current = false;
-      setIsCurrentTradeReal(false);
-    }
-
-    currentStakeRef.current = effectiveBaseStakeRef.current;
-    setCurrentStake(effectiveBaseStakeRef.current);
-    setSessionProfit(0);
-    sessionProfitRef.current = 0;
-    setWinsCount(0);
-    winsCountRef.current = 0;
-    setLossesCount(0);
-    lossesCountRef.current = 0;
-    setConsecLosses(0);
-    consecLossesRef.current = 0;
-    setConsecutiveVirtualLosses(0);
-    consecVirtualLossesRef.current = 0;
-    setLostPatternsState([]);
-    lostPatternsRef.current = [];
-
-    if (patternSmartModeRef.current) {
-      const learned = runPatternLearning();
-      if (learned) {
-        setCustomPattern(learned.pattern);
-        customPatternRef.current = learned.pattern;
-        setPatternSmartDigit(learned.digit);
-        patternSmartDigitRef.current = learned.digit;
+    try {
+      const res = await fetch('/api/cloud-bots/autobot/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCloudConfigRef.current()),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        notify('error', data?.error || 'Failed to start Cloud AutoBot.');
+      } else if (data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
       }
+    } catch (err: any) {
+      notify('error', err?.message || 'Failed to start Cloud AutoBot.');
     }
+  }, [connected, notify, onCloudBotsUpdate]);
 
-    isRunningRef.current = true;
-    setIsRunning(true);
-    appendLog(
-      `AI Engine started (${contractTypeRef.current.toUpperCase()} · ${streakModeRef.current}${effectiveUseVirtualLossRef.current ? ' · Virtual Loss Filter ON' : ''})`
-    );
-    notify('success', 'AutoBot AI Engine started.');
-  }, [appendLog, connected, notify, runPatternLearning]);
+  const handleStopBot = useCallback(async () => {
+    try {
+      const res = await fetch('/api/cloud-bots/autobot/stop', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        notify('error', data?.error || 'Failed to stop Cloud AutoBot.');
+      } else if (data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
+      }
+    } catch (err: any) {
+      notify('error', err?.message || 'Failed to stop Cloud AutoBot.');
+    }
+  }, [notify, onCloudBotsUpdate]);
 
-  const handleStopBot = useCallback(() => {
-    isRunningRef.current = false;
-    setIsRunning(false);
-    signalQueueRef.current = [];
-    continuousLockedMarketRef.current = null;
-    lockedVirtualMarketRef.current = null;
-    setLockedVirtualMarket(null);
-    appendLog('AI Engine stopped by user.');
-    notify('info', 'AutoBot stopped.');
-  }, [appendLog, notify]);
-
-  const handleResetAndClear = useCallback(() => {
+  const handleResetAndClear = useCallback(async () => {
     if (isRunningRef.current) return;
-    signalQueueRef.current = [];
-    continuousLockedMarketRef.current = null;
-    lockedVirtualMarketRef.current = null;
-    setLockedVirtualMarket(null);
-    lastLostMarketRef.current = null;
-    lastLossTimeRef.current = 0;
-    setSessionProfit(0);
-    sessionProfitRef.current = 0;
-    setCumulativeSessionProfit(0);
-    cumulativeSessionProfitRef.current = 0;
-    sessionStorage.removeItem('autobot_cumulativeSessionProfit');
-    setWinsCount(0);
-    winsCountRef.current = 0;
-    setLossesCount(0);
-    lossesCountRef.current = 0;
-    setConsecLosses(0);
-    consecLossesRef.current = 0;
-    setVirtualWinsCount(0);
-    setVirtualLossesCount(0);
-    setConsecutiveVirtualLosses(0);
-    consecVirtualLossesRef.current = 0;
-    setLostPatternsState([]);
-    lostPatternsRef.current = [];
-    setCurrentStake(effectiveBaseStakeRef.current);
-    currentStakeRef.current = effectiveBaseStakeRef.current;
-    setOtivoLog([]);
-    setNeuralSignals([]);
-    notify('info', 'AutoBot session counters and logs cleared.');
-  }, [notify]);
+    try {
+      const res = await fetch('/api/cloud-bots/autobot/reset', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
+      } else if (!res.ok) {
+        notify('error', data?.error || 'Failed to reset AutoBot.');
+      }
+      sessionStorage.removeItem('autobot_cumulativeSessionProfit');
+      setNeuralSignals([]);
+    } catch (err: any) {
+      notify('error', err?.message || 'Failed to reset AutoBot.');
+    }
+  }, [notify, onCloudBotsUpdate]);
 
-  // 1-second real-time clock + alarm auto-start checker
-  const alarmsRef = useRef(alarms);
-  alarmsRef.current = alarms;
-  const isAlarmSchedulerEnabledRef = useRef(isAlarmSchedulerEnabled);
-  isAlarmSchedulerEnabledRef.current = isAlarmSchedulerEnabled;
-
+  // 1-second real-time clock display (server executes scheduled alarms 24/7 even when browser is offline)
   useEffect(() => {
     const timer = setInterval(() => {
       const now = new Date();
@@ -1180,28 +1184,25 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
       const mm = String(now.getMinutes()).padStart(2, '0');
       const ss = String(now.getSeconds()).padStart(2, '0');
       setCurrentTimeStr(`${hh}:${mm}:${ss}`);
-
-      if (!isAlarmSchedulerEnabledRef.current || isRunningRef.current) return;
-      const hm = `${hh}:${mm}`;
-      const todayKey = now.toISOString().slice(0, 10);
-      const dayOfWeek = now.getDay();
-
-      for (const alarm of alarmsRef.current) {
-        if (!alarm.enabled) continue;
-        if (alarm.time !== hm) continue;
-        if (alarm.days && alarm.days.length > 0 && !alarm.days.includes(dayOfWeek)) continue;
-        if (alarm.triggeredToday === todayKey) continue;
-
-        setAlarms((prev) =>
-          prev.map((a) => (a.id === alarm.id ? { ...a, triggeredToday: todayKey } : a))
-        );
-        appendLog(`Scheduled alarm triggered (${alarm.time}${alarm.label ? ` · ${alarm.label}` : ''})`);
-        handleStartBot();
-        break;
-      }
     }, 1000);
     return () => clearInterval(timer);
-  }, [appendLog, handleStartBot]);
+  }, []);
+
+  const syncAlarmsToCloud = useCallback(
+    (nextAlarms: AutoBotAlarm[]) => {
+      fetch('/api/cloud-bots/autobot/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCloudConfigRef.current(nextAlarms)),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(d.cloudBots);
+        })
+        .catch(() => {});
+    },
+    [onCloudBotsUpdate]
+  );
 
   const handleAddAlarm = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -1213,17 +1214,23 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
       enabled: true,
       days: [...newAlarmDays],
     };
-    setAlarms((prev) => [...prev, item]);
+    const nextAlarms = [...alarms, item];
+    setAlarms(nextAlarms);
     setNewAlarmLabel('');
-    notify('success', `Alarm scheduled for ${newAlarmTime}.`);
+    syncAlarmsToCloud(nextAlarms);
+    notify('success', `Alarm scheduled for ${newAlarmTime} (Cloud 24/7).`);
   };
 
   const handleToggleAlarm = (id: string) => {
-    setAlarms((prev) => prev.map((a) => (a.id === id ? { ...a, enabled: !a.enabled } : a)));
+    const nextAlarms = alarms.map((a) => (a.id === id ? { ...a, enabled: !a.enabled } : a));
+    setAlarms(nextAlarms);
+    syncAlarmsToCloud(nextAlarms);
   };
 
   const handleDeleteAlarm = (id: string) => {
-    setAlarms((prev) => prev.filter((a) => a.id !== id));
+    const nextAlarms = alarms.filter((a) => a.id !== id);
+    setAlarms(nextAlarms);
+    syncAlarmsToCloud(nextAlarms);
   };
 
   // Dedicated Deriv Public WebSocket for 1000-tick history + multi-market signal scanner
@@ -1972,268 +1979,6 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
               );
             }
           }
-
-          // Determine if triggered
-          if (!isRunningRef.current) return;
-
-          let isTriggered = false;
-          if (activeContractType === 'accumulator') {
-            if (activeStreakMode === 'analysis_tool') {
-              const c = computeAccumulatorSignal(rPrices, history, symbol);
-              isTriggered = c.isNeutral5050 || c.action === 'BUY_ACCU';
-            } else if (accumulatorMetrics) {
-              const enabled = Object.entries(accuStrategiesRef.current)
-                .filter(([, v]) => v)
-                .map(([k]) => k);
-              isTriggered =
-                enabled.length > 0 &&
-                enabled.every((k) => Boolean(accumulatorMetrics.satisfied[k]));
-            }
-          } else if (activeStreakMode === 'analysis_tool') {
-            if (activeContractType === 'digitdiff') {
-              isTriggered = computeDiffersSignal(history, symbol).confidence >= 80;
-            } else if (
-              ['over_under', 'digitover', 'digitunder', 'dual_ou'].includes(activeContractType)
-            ) {
-              const ouObj = computeOverUnderSignal(
-                history,
-                symbol,
-                activeTargetDigit !== -1 ? activeTargetDigit : 4,
-                4
-              );
-              let dir = ouObj.direction;
-              const opp = isRecActive
-                ? recoveryAnalysisOppositeSignalEnabledRef.current
-                : analysisOppositeSignalEnabledRef.current;
-              if (opp) {
-                if (dir === 'OVER') dir = 'UNDER';
-                else if (dir === 'UNDER') dir = 'OVER';
-              }
-              if (activeContractType === 'digitover')
-                isTriggered = dir === 'OVER' && ouObj.confidence >= 60;
-              else if (activeContractType === 'digitunder')
-                isTriggered = dir === 'UNDER' && ouObj.confidence >= 60;
-              else isTriggered = (dir === 'OVER' || dir === 'UNDER') && ouObj.confidence >= 60;
-            } else if (activeContractType === 'digitmatch') {
-              isTriggered = computeMatchSignal(history).confidence >= 40;
-            }
-          } else if (activeStreakMode.startsWith('circle_')) {
-            isTriggered = circleTriggered;
-          } else if (activeStreakMode === 'pattern') {
-            isTriggered = patternMatched;
-          } else if (activeStreakMode === 'over_under') {
-            isTriggered = overUnderSignal !== null;
-          } else if (activeStreakMode === 'price_digits') {
-            isTriggered = priceDigitsSignal.matched;
-          } else if (activeStreakMode === 'axa') {
-            isTriggered = axaSignal !== null;
-          } else if (activeStreakMode === 'differs_noise') {
-            isTriggered = differsCalmNoiseSignal !== null;
-          } else if (activeStreakMode === 'lad_prng') {
-            isTriggered = ladPrngSignal !== null;
-          } else if (activeStreakMode === 'types') {
-            isTriggered = typesSignal !== null;
-          } else if (activeStreakMode === 'percentage') {
-            isTriggered = activeIsExactPct
-              ? currentPct === activePctThresh
-              : currentPct >= activePctThresh;
-          } else if (activeStreakMode === 'consecutive_touch') {
-            isTriggered = consecTouchMatched;
-          } else {
-            isTriggered = currentStreak >= activeStreakThreshold;
-          }
-
-          // Market locking rules (Continuous & Virtual)
-          const activeLocked =
-            continuousLockedMarketRef.current ||
-            (effectiveUseVirtualLossRef.current ? lockedVirtualMarketRef.current : null);
-          if (activeLocked && activeLocked !== symbol) {
-            isTriggered = false;
-          }
-          if (
-            isContinuousTradingRef.current &&
-            continuousLockedMarketRef.current === symbol
-          ) {
-            isTriggered = true;
-          }
-
-          const isVirtualThresholdMet = Boolean(
-            effectiveUseVirtualLossRef.current &&
-              (isCurrentTradeRealRef.current ||
-                consecVirtualLossesRef.current >= virtualLossThresholdRef.current)
-          );
-          if (isVirtualThresholdMet && lockedVirtualMarketRef.current === symbol) {
-            isTriggered = true;
-          }
-
-          if (!isTriggered) return;
-
-          if (isContinuousTradingRef.current && !continuousLockedMarketRef.current) {
-            continuousLockedMarketRef.current = symbol;
-            appendLog(
-              `${symbol}: Continuous trading locked until Take Profit is reached.`
-            );
-          }
-
-          if (
-            isRecoveryStreakModeEnabledRef.current &&
-            lastLossTimeRef.current > 0 &&
-            Date.now() - lastLossTimeRef.current < 5000
-          ) {
-            return;
-          }
-
-          if (
-            alternateMarketRecoveryRef.current &&
-            !activeLocked &&
-            checkedMarketsRef.current.length > 1 &&
-            lastLostMarketRef.current === symbol
-          ) {
-            return;
-          }
-
-          const lastTrade = lastTradeTimePerSymbol.current[symbol] || 0;
-          if (!isVirtualThresholdMet && consecLossesRef.current === 0 && nowMs - lastTrade < 400) return;
-          lastTradeTimePerSymbol.current[symbol] = nowMs;
-
-          // Build signal payload
-          let termContract: AutoBotSignalQueueItem['contractType'] =
-            activeContractType === 'accumulator'
-              ? 'ACCU'
-              : activeContractType === 'digitover'
-              ? 'DIGITOVER'
-              : activeContractType === 'digitunder'
-              ? 'DIGITUNDER'
-              : activeContractType === 'digitmatch'
-              ? 'DIGITMATCH'
-              : activeContractType === 'dual_ou'
-              ? 'DUAL_OU'
-              : activeContractType === 'over_under'
-              ? activeOuPatternSelection === 'under8'
-                ? 'DIGITUNDER'
-                : 'DIGITOVER'
-              : 'DIGITDIFF';
-
-          let prediction =
-            activeContractType === 'digitover'
-              ? activeTargetDigit >= 0 && activeTargetDigit <= 8
-                ? activeTargetDigit
-                : 2
-              : activeContractType === 'digitunder'
-              ? activeTargetDigit >= 1 && activeTargetDigit <= 9
-                ? activeTargetDigit
-                : 8
-              : activeTargetDigit >= 0 && activeTargetDigit <= 9
-              ? activeTargetDigit
-              : coldDigit;
-
-          let strategyName: string | null = activeStreakMode;
-
-          if (activeContractType === 'over_under' && activeStreakMode === 'pattern') {
-            termContract = activeOuPatternSelection === 'under8' ? 'DIGITUNDER' : 'DIGITOVER';
-            prediction = termContract === 'DIGITUNDER' ? 8 : 1;
-          } else if (activeStreakMode === 'analysis_tool') {
-            strategyName = 'Analysis Signal Bridge';
-            if (activeContractType === 'digitdiff') {
-              termContract = 'DIGITDIFF';
-              prediction = computeDiffersSignal(history, symbol).prediction;
-            } else if (
-              ['over_under', 'dual_ou', 'digitover', 'digitunder'].includes(activeContractType)
-            ) {
-              const ouObj = computeOverUnderSignal(history, symbol, 4, 4);
-              let dir = ouObj.direction;
-              const opp = isRecActive
-                ? recoveryAnalysisOppositeSignalEnabledRef.current
-                : analysisOppositeSignalEnabledRef.current;
-              if (opp) {
-                if (dir === 'OVER') dir = 'UNDER';
-                else if (dir === 'UNDER') dir = 'OVER';
-              }
-              termContract = dir === 'UNDER' ? 'DIGITUNDER' : 'DIGITOVER';
-              prediction =
-                activeContractType === 'digitover'
-                  ? activeTargetDigit >= 0 && activeTargetDigit <= 8
-                    ? activeTargetDigit
-                    : 1
-                  : activeContractType === 'digitunder'
-                  ? activeTargetDigit >= 1 && activeTargetDigit <= 9
-                    ? activeTargetDigit
-                    : 8
-                  : termContract === 'DIGITUNDER'
-                  ? 8
-                  : 1;
-            } else if (activeContractType === 'digitmatch') {
-              termContract = 'DIGITMATCH';
-              prediction = computeMatchSignal(history).prediction;
-            }
-          } else if (activeStreakMode === 'consecutive_touch') {
-            termContract = isOverTarget ? 'DIGITOVER' : 'DIGITUNDER';
-            prediction = activeBarrier;
-            strategyName = 'Streak & Touch';
-          } else if (activeStreakMode === 'circle_over_under') {
-            const tType =
-              activeContractType === 'digitover'
-                ? 'over'
-                : activeContractType === 'digitunder'
-                ? 'under'
-                : circleOuTargetTypeRef.current;
-            termContract = tType === 'over' ? 'DIGITOVER' : 'DIGITUNDER';
-            prediction = circleTargetDigit ?? circleOuDigitRef.current ?? (tType === 'over' ? 1 : 8);
-            strategyName = circleStrategyLabel || 'Circle O/U';
-          } else if (activeStreakMode === 'over_under' && overUnderSignal) {
-            termContract = overUnderSignal.type === 'digitover' ? 'DIGITOVER' : 'DIGITUNDER';
-            prediction = overUnderSignal.prediction;
-            strategyName = isEdmsEnabledRef.current ? 'EDMS O1/U8' : 'O1/U8 Cold Zone';
-          } else if (activeStreakMode.startsWith('circle_') && circleTargetDigit !== null) {
-            prediction =
-              activeContractType === 'digitover'
-                ? Math.min(8, circleTargetDigit)
-                : activeContractType === 'digitunder'
-                ? Math.max(1, circleTargetDigit)
-                : circleTargetDigit;
-            strategyName = circleStrategyLabel;
-          } else if (activeStreakMode === 'axa' && axaSignal) {
-            prediction = axaSignal.prediction;
-            strategyName = `AXA (${axaSignal.pattern})`;
-          } else if (activeStreakMode === 'differs_noise' && differsCalmNoiseSignal) {
-            prediction = differsCalmNoiseSignal.prediction;
-            strategyName = 'Calm Digit Noise';
-          } else if (activeStreakMode === 'lad_prng' && ladPrngSignal) {
-            prediction = ladPrngSignal.prediction;
-            strategyName = `Follower [${ladPrngSignal.patternStr}]`;
-          } else if (activeStreakMode === 'pattern' && bestDifferDigit !== undefined) {
-            prediction = bestDifferDigit;
-            strategyName = `Pattern [${matchedPatternKey || activeCustomPattern}]`;
-          } else if (activeStreakMode === 'types' && typesSignal) {
-            prediction = typesSignal.prediction;
-            strategyName = typesSignal.strategyName;
-          } else if (activeStreakMode === 'price_digits' && priceDigitsSignal?.target) {
-            const parsedLast = parseInt(priceDigitsSignal.target.slice(-1), 10);
-            if (!isNaN(parsedLast) && activeTargetDigit === -1) {
-              prediction = parsedLast;
-            }
-            strategyName = `Price Digits (${priceDigitsSignal.target})`;
-          }
-
-          if (signalQueueRef.current.length < 15) {
-            signalQueueRef.current.push({
-              symbol,
-              type: activeContractType,
-              contractType: termContract,
-              prediction,
-              prediction2: activeContractType === 'dual_ou' ? activeTargetDigit2 : undefined,
-              amount: currentStakeRef.current,
-              timestamp: nowMs,
-              accuGrowthRate: isRecActive
-                ? recoveryAccumulatorGrowthRateRef.current
-                : accumulatorGrowthRateRef.current,
-              accuTakeProfit: isRecActive
-                ? recoveryAccumulatorTakeProfitRef.current
-                : accumulatorTakeProfitRef.current,
-              matchedPatternKey,
-              strategyName,
-            });
-          }
         }
       };
 
@@ -2265,323 +2010,10 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
         }
       }
     };
-  }, [appendLog, checkedMarketsKey]);
-
-  // Signal Queue Execution Consumer Loop (calls /api/autobot/trade on Real or Virtual connection)
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      if (!isRunningRef.current || tradeInFlightRef.current) return;
-      if (signalQueueRef.current.length === 0) return;
-
-      const sig = signalQueueRef.current.shift();
-      if (!sig) return;
-      if (Date.now() - sig.timestamp > 15000) return;
-
-      const activeLocked =
-        continuousLockedMarketRef.current ||
-        (effectiveUseVirtualLossRef.current ? lockedVirtualMarketRef.current : null);
-      if (activeLocked && activeLocked !== sig.symbol) return;
-
-      if (
-        alternateMarketRecoveryRef.current &&
-        !activeLocked &&
-        checkedMarketsRef.current.length > 1 &&
-        lastLostMarketRef.current === sig.symbol
-      ) {
-        return;
-      }
-
-      tradeInFlightRef.current = true;
-      try {
-        const useVirtual = effectiveUseVirtualLossRef.current;
-        const shouldTradeReal = !useVirtual
-          ? true
-          : isCurrentTradeRealRef.current ||
-            consecVirtualLossesRef.current >= virtualLossThresholdRef.current;
-
-        const dur = isRandomTicksRef.current
-          ? Math.floor(Math.random() * 10) + 1
-          : Math.min(10, Math.max(1, tradeDurationRef.current));
-
-        const contractMap: Record<
-          AutoBotSignalQueueItem['contractType'],
-          'digitdiff' | 'digitmatch' | 'digitover' | 'digitunder' | 'accumulator' | 'dual_ou'
-        > = {
-          DIGITDIFF: 'digitdiff',
-          DIGITMATCH: 'digitmatch',
-          DIGITOVER: 'digitover',
-          DIGITUNDER: 'digitunder',
-          ACCU: 'accumulator',
-          DUAL_OU: 'dual_ou',
-        };
-        const apiContractType = contractMap[sig.contractType] || 'digitdiff';
-
-        let realStakeUsed = Math.max(
-          0.35,
-          Number((currentStakeRef.current || effectiveBaseStakeRef.current || 1).toFixed(2))
-        );
-        if (apiContractType === 'accumulator' && realStakeUsed < 1) {
-          realStakeUsed = 1;
-        }
-        if (
-          isAutoStakeEnabled &&
-          accountBalanceRef.current > 0 &&
-          realStakeUsed > accountBalanceRef.current
-        ) {
-          realStakeUsed = effectiveBaseStakeRef.current;
-          currentStakeRef.current = realStakeUsed;
-          setCurrentStake(realStakeUsed);
-        }
-
-        // Virtual Mode hardcoded stakes: $1.00 USD for Accumulators, $0.35 USD for all other contract types
-        const virtualStake = apiContractType === 'accumulator' ? 1.0 : 0.35;
-
-        // Advance rotational pattern index if used
-        if (patternRotationalModeRef.current && sig.matchedPatternKey) {
-          const seq = sig.matchedPatternKey.split('=')[0];
-          patternRotationalIdx.current[seq] =
-            ((patternRotationalIdx.current[seq] || 0) + 1) % Math.max(1, seq.length);
-        }
-
-        const executeTradeCall = async (isVirtualExec: boolean, stakeAmount: number) => {
-          const res = await fetch('/api/autobot/trade', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              symbol: sig.symbol,
-              contractType: apiContractType,
-              prediction: sig.prediction,
-              prediction2: sig.prediction2,
-              stake: stakeAmount,
-              duration: dur,
-              growthRate: (sig.accuGrowthRate ?? 2) / 100,
-              takeProfit: sig.accuTakeProfit ?? 10,
-              isVirtual: isVirtualExec,
-              strategyName: sig.strategyName || undefined,
-            }),
-          });
-          const data = await res.json();
-          if (!res.ok) {
-            throw new Error(data?.error || 'Trade execution rejected');
-          }
-          const isWin =
-            typeof data?.won === 'boolean' ? data.won : data?.trade?.status === 'WON';
-          const profit = Number(data?.profit ?? data?.trade?.profit ?? 0);
-          return { isWin, profit };
-        };
-
-        let realOutcome: { isWin: boolean; profit: number } | null = null;
-
-        if (!shouldTradeReal && useVirtual) {
-          appendLog(
-            `VIRTUAL ${sig.contractType} on ${sig.symbol} (Pred ${sig.prediction}, Stake $${virtualStake.toFixed(2)}, ${sig.strategyName || 'AutoBot'})`
-          );
-          const vRes = await executeTradeCall(true, virtualStake);
-
-          if (vRes.isWin) {
-            setVirtualWinsCount((w) => w + 1);
-            consecVirtualLossesRef.current = 0;
-            setConsecutiveVirtualLosses(0);
-            lockedVirtualMarketRef.current = null;
-            setLockedVirtualMarket(null);
-            appendLog(`VIRTUAL WIN (+${vRes.profit.toFixed(2)}) on ${sig.symbol} · Reset streak`);
-            return;
-          }
-
-          const nextVLosses = consecVirtualLossesRef.current + 1;
-          setVirtualLossesCount((l) => l + 1);
-          consecVirtualLossesRef.current = nextVLosses;
-          setConsecutiveVirtualLosses(nextVLosses);
-
-          if (nextVLosses < virtualLossThresholdRef.current) {
-            appendLog(
-              `VIRTUAL LOSS (${nextVLosses}/${virtualLossThresholdRef.current}) on ${sig.symbol}`
-            );
-            return;
-          }
-
-          // Threshold met -> Arm REAL and purchase IMMEDIATELY with ZERO lag
-          lockedVirtualMarketRef.current = sig.symbol;
-          setLockedVirtualMarket(sig.symbol);
-          isCurrentTradeRealRef.current = true;
-          setIsCurrentTradeReal(true);
-          appendLog(
-            `VIRTUAL LOSS threshold (${nextVLosses}/${virtualLossThresholdRef.current}) met on ${sig.symbol} → Switching to REAL immediately @ $${realStakeUsed.toFixed(2)}!`
-          );
-
-          if (!isRunningRef.current) return;
-          realOutcome = await executeTradeCall(false, realStakeUsed);
-        } else {
-          appendLog(
-            `REAL ${sig.contractType} on ${sig.symbol} (Pred ${sig.prediction}, Stake ${realStakeUsed.toFixed(2)}, ${sig.strategyName || 'AutoBot'})`
-          );
-          realOutcome = await executeTradeCall(false, realStakeUsed);
-        }
-
-        if (!realOutcome) return;
-        const { isWin, profit } = realOutcome;
-
-        // REAL trade bookkeeping
-        const nextProfit = sessionProfitRef.current + profit;
-        sessionProfitRef.current = nextProfit;
-        setSessionProfit(nextProfit);
-
-        const nextCumProfit = cumulativeSessionProfitRef.current + profit;
-        cumulativeSessionProfitRef.current = nextCumProfit;
-        setCumulativeSessionProfit(nextCumProfit);
-        sessionStorage.setItem('autobot_cumulativeSessionProfit', nextCumProfit.toFixed(2));
-
-        if (isWin) {
-          const nextWins = winsCountRef.current + 1;
-          winsCountRef.current = nextWins;
-          setWinsCount(nextWins);
-          consecLossesRef.current = 0;
-          setConsecLosses(0);
-          lastLostMarketRef.current = null;
-          setLostPatternsState([]);
-          lostPatternsRef.current = [];
-          currentStakeRef.current = effectiveBaseStakeRef.current;
-          setCurrentStake(effectiveBaseStakeRef.current);
-
-          if (useVirtual) {
-            consecVirtualLossesRef.current = 0;
-            setConsecutiveVirtualLosses(0);
-            lockedVirtualMarketRef.current = null;
-            setLockedVirtualMarket(null);
-            if (!virtualAfterRealLossRef.current) {
-              isCurrentTradeRealRef.current = false;
-              setIsCurrentTradeReal(false);
-            }
-          }
-
-          appendLog(
-            `WON +${profit.toFixed(2)} ${currency} on ${sig.symbol} (Session ${nextProfit.toFixed(2)})`
-          );
-
-          const hitRuns =
-            !runForeverRef.current &&
-            isRunsLimitEnabledRef.current &&
-            nextWins >= runsLimitRef.current;
-          const hitTp =
-            !runForeverRef.current &&
-            !isRunsLimitEnabledRef.current &&
-            nextProfit >= takeProfitRef.current;
-
-          if (hitRuns || hitTp) {
-            continuousLockedMarketRef.current = null;
-            lockedVirtualMarketRef.current = null;
-            setLockedVirtualMarket(null);
-
-            if (autoRestartAfterTpRef.current) {
-              if (nextCumProfit >= autoRestartMaxTpRef.current) {
-                isRunningRef.current = false;
-                setIsRunning(false);
-                setAutoRestartAfterTp(false);
-                appendLog(
-                  `Overall Auto-Start Take Profit $${autoRestartMaxTpRef.current.toFixed(2)} reached! Bot stopped.`
-                );
-                notify('success', `Overall Target +$${autoRestartMaxTpRef.current.toFixed(2)} hit!`);
-              } else {
-                sessionProfitRef.current = 0;
-                setSessionProfit(0);
-                winsCountRef.current = 0;
-                setWinsCount(0);
-                lossesCountRef.current = 0;
-                setLossesCount(0);
-                appendLog(
-                  `Session TP hit (+${nextProfit.toFixed(2)}). Auto-reset & continuing toward $${autoRestartMaxTpRef.current.toFixed(2)}...`
-                );
-              }
-            } else {
-              isRunningRef.current = false;
-              setIsRunning(false);
-              notify(
-                'success',
-                hitRuns
-                  ? `Target ${runsLimitRef.current} winning runs reached!`
-                  : `Take Profit +${nextProfit.toFixed(2)} reached!`
-              );
-            }
-          }
-        } else {
-          const nextLosses = lossesCountRef.current + 1;
-          lossesCountRef.current = nextLosses;
-          setLossesCount(nextLosses);
-          consecLossesRef.current = consecLossesRef.current + 1;
-          setConsecLosses(consecLossesRef.current);
-          lastLostMarketRef.current = sig.symbol;
-          lastLossTimeRef.current = Date.now();
-
-          if (patternRecoveryModeRef.current && sig.matchedPatternKey) {
-            const nextLost = [...new Set([...lostPatternsRef.current, sig.matchedPatternKey])];
-            lostPatternsRef.current = nextLost;
-            setLostPatternsState(nextLost);
-          }
-
-          if (patternSmartModeRef.current) {
-            const relearned = runPatternLearning(
-              sig.matchedPatternKey?.split('=')[0],
-              sig.prediction
-            );
-            if (relearned) {
-              setCustomPattern(relearned.pattern);
-              customPatternRef.current = relearned.pattern;
-              setPatternSmartDigit(relearned.digit);
-              patternSmartDigitRef.current = relearned.digit;
-            }
-          }
-
-          const mult = Number(martingaleRef.current) || 1;
-          if (mult > 1) {
-            const nextStake = Math.min(
-              9130,
-              Math.max(0.35, Math.round(realStakeUsed * mult * 100) / 100)
-            );
-            currentStakeRef.current = nextStake;
-            setCurrentStake(nextStake);
-          }
-
-          if (useVirtual && virtualAfterRealLossRef.current) {
-            consecVirtualLossesRef.current = 0;
-            setConsecutiveVirtualLosses(0);
-            isCurrentTradeRealRef.current = false;
-            setIsCurrentTradeReal(false);
-          }
-
-          appendLog(
-            `LOST ${profit.toFixed(2)} ${currency} on ${sig.symbol} · Next stake ${currentStakeRef.current.toFixed(2)}`
-          );
-
-          if (!runForeverRef.current && Math.abs(Math.min(0, nextProfit)) >= stopLossRef.current) {
-            isRunningRef.current = false;
-            setIsRunning(false);
-            notify('error', `Stop Loss -${Math.abs(nextProfit).toFixed(2)} reached. Bot stopped.`);
-          }
-        }
-      } catch (err: any) {
-        appendLog(`Trade Error: ${err?.message || 'Execution failed'}`);
-        notify('error', err?.message || 'AutoBot trade execution error.');
-      } finally {
-        tradeInFlightRef.current = false;
-      }
-    }, 20);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [appendLog, currency, isAutoStakeEnabled, notify, runPatternLearning]);
-
-  // Stop local execution cleanly on unmount
-  useEffect(() => {
-    return () => {
-      isRunningRef.current = false;
-    };
-  }, []);
+  }, [checkedMarketsKey]);
 
   const handleContractTypeChange = (typeId: AutoBotContractType) => {
     setContractTypeState(typeId);
-    signalQueueRef.current = [];
-    continuousLockedMarketRef.current = null;
     if (typeId === 'digitover') {
       if (targetDigit < 0 || targetDigit > 8) setTargetDigit(2);
       if (['types', 'axa', 'differs_noise', 'lad_prng', 'over_under'].includes(streakMode)) {
@@ -2690,45 +2122,6 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
 
   return (
     <div className="flex-1 flex flex-col md:flex-row min-h-0 bg-[#0a0b0d] rounded-xl border border-[#1F2937] overflow-hidden select-none relative">
-      {/* Inline Notification Toast Stack */}
-      {toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-auto">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              className={cn(
-                'flex items-center justify-between gap-2.5 rounded-xl border px-3.5 py-2.5 text-xs font-semibold shadow-2xl backdrop-blur-md',
-                t.type === 'success'
-                  ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-200'
-                  : t.type === 'error'
-                  ? 'bg-rose-950/90 border-rose-500/50 text-rose-200'
-                  : t.type === 'warn'
-                  ? 'bg-amber-950/90 border-amber-500/50 text-amber-200'
-                  : 'bg-[#14171f]/95 border-slate-700 text-slate-200'
-              )}
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                {t.type === 'success' ? (
-                  <CheckCircle2 size={14} className="text-emerald-400 shrink-0" />
-                ) : t.type === 'error' ? (
-                  <AlertTriangle size={14} className="text-rose-400 shrink-0" />
-                ) : (
-                  <Info size={14} className="text-sky-400 shrink-0" />
-                )}
-                <span className="truncate">{t.message}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setToasts((prev) => prev.filter((item) => item.id !== t.id))}
-                className="text-slate-400 hover:text-white shrink-0"
-              >
-                <X size={13} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* LEFT SIDEBAR CONTROL PANEL */}
       <aside className="w-full md:w-80 lg:w-[340px] bg-[#121315] border-b md:border-b-0 md:border-r border-[#222428] flex flex-col p-4 shrink-0 space-y-4 overflow-y-auto md:max-h-[calc(100vh-110px)]">
         {/* Mobile header */}
@@ -4679,12 +4072,7 @@ export const AutoBotPage: React.FC<AutoBotPageProps> = ({
                 <button
                   type="button"
                   disabled={isRunning}
-                  onClick={() => {
-                    cumulativeSessionProfitRef.current = 0;
-                    setCumulativeSessionProfit(0);
-                    setSessionProfit(0);
-                    sessionStorage.removeItem('autobot_cumulativeSessionProfit');
-                  }}
+                  onClick={handleResetAndClear}
                   title="Reset cumulative profit counter"
                   className="p-1.5 rounded-lg bg-[#141622] border border-[#292c3d] text-slate-300 hover:text-white cursor-pointer"
                 >

@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Play, Square, Zap, ShieldCheck, Activity } from 'lucide-react';
 import { TickData } from './types';
 import { cn } from '../../lib/utils';
+import type { CloudBotsSnapshot, GridMasterCloudState } from '../../types/cloudBots';
 
 interface MarketStream {
   symbol: string;
@@ -14,6 +15,8 @@ interface OverUnderActiveBotProps {
   isMultiMarketMode?: boolean;
   connected?: boolean;
   hasVirtualToken?: boolean;
+  cloudState?: GridMasterCloudState;
+  onCloudBotsUpdate?: (snap: CloudBotsSnapshot) => void;
 }
 
 export const OverUnderActiveBot: React.FC<OverUnderActiveBotProps> = ({
@@ -21,8 +24,9 @@ export const OverUnderActiveBot: React.FC<OverUnderActiveBotProps> = ({
   isMultiMarketMode = false,
   connected = false,
   hasVirtualToken = false,
+  cloudState,
+  onCloudBotsUpdate,
 }) => {
-  const [running, setRunning] = useState(false);
   const [stake, setStake] = useState<number>(1.0);
   const [martingale, setMartingale] = useState<number>(2.1);
   const [duration, setDuration] = useState<number>(1);
@@ -31,216 +35,80 @@ export const OverUnderActiveBot: React.FC<OverUnderActiveBotProps> = ({
   const [strategyMode, setStrategyMode] = useState<'over1_under8' | 'over4_under5'>('over1_under8');
   const [useVirtual, setUseVirtual] = useState<boolean>(false);
   const [virtualLossTarget, setVirtualLossTarget] = useState<number>(1);
-  const [virtualWins, setVirtualWins] = useState(0);
-  const [virtualLosses, setVirtualLosses] = useState(0);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const [wins, setWins] = useState(0);
-  const [losses, setLosses] = useState(0);
-  const [profit, setProfit] = useState(0);
-  const [currentStake, setCurrentStake] = useState(1.0);
-  const [statusLog, setStatusLog] = useState<string>('Standby — monitors all open grid markets for Over/Under pressure signals.');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  const runningRef = useRef(false);
-  const executingRef = useRef(false);
-  const currentStakeRef = useRef(1.0);
-  const profitRef = useRef(0);
-  const lastTradeAtRef = useRef(0);
-  const vLossStreakRef = useRef(0);
-  const inRealPhaseRef = useRef(true);
+  const running = Boolean(cloudState?.running);
+  const wins = cloudState?.wins ?? 0;
+  const losses = cloudState?.losses ?? 0;
+  const virtualWins = cloudState?.virtualWins ?? 0;
+  const virtualLosses = cloudState?.virtualLosses ?? 0;
+  const profit = cloudState?.profit ?? 0;
+  const currentStake = cloudState?.currentStake ?? stake;
+  const statusLog =
+    cloudState?.statusLog ??
+    'Standby — monitors all open grid markets for Over/Under pressure signals.';
+  const errorMsg = localError || cloudState?.errorMsg || null;
 
   useEffect(() => {
     if (!hasVirtualToken && useVirtual) {
       setUseVirtual(false);
-      inRealPhaseRef.current = true;
     }
   }, [hasVirtualToken, useVirtual]);
 
-  const stopBot = () => {
-    runningRef.current = false;
-    setRunning(false);
-    setStatusLog('Master Over/Under Bot stopped.');
+  const stopBot = async () => {
+    setLocalError(null);
+    setBusy(true);
+    try {
+      const res = await fetch('/api/cloud-bots/grid-master/stop', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        setLocalError(data?.error || 'Failed to stop Master Bot.');
+      } else if (data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
+      }
+    } catch (err: any) {
+      setLocalError(err?.message || 'Failed to stop Master Bot.');
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const startBot = () => {
-    setErrorMsg(null);
+  const startBot = async () => {
+    setLocalError(null);
     if (!connected) {
-      setErrorMsg('Connect your Deriv API token via Deriv API Connection first.');
+      setLocalError('Connect your Deriv API token via Deriv API Connection first.');
       return;
     }
-    setWins(0);
-    setLosses(0);
-    setVirtualWins(0);
-    setVirtualLosses(0);
-    setProfit(0);
-    profitRef.current = 0;
-    vLossStreakRef.current = 0;
-    const virtActive = Boolean(hasVirtualToken && useVirtual);
-    inRealPhaseRef.current = !virtActive;
-    const base = Math.max(0.35, Number(stake) || 1);
-    setCurrentStake(base);
-    currentStakeRef.current = base;
-    runningRef.current = true;
-    executingRef.current = false;
-    lastTradeAtRef.current = 0;
-    setRunning(true);
-    setStatusLog(`Monitoring ${markets.length} market(s) for high-pressure Over/Under signals...`);
-  };
-
-  useEffect(() => {
-    if (!running || executingRef.current) return;
-    const now = Date.now();
-    if (now - lastTradeAtRef.current < 400) return;
-
-    // Scan open grid markets for strongest signal
-    for (const m of markets) {
-      const list = m.ticks;
-      if (!list || list.length < 25) continue;
-      const recent = list.slice(-25);
-      const over1Count = recent.filter((t) => t.digit > 1).length;
-      const under8Count = recent.filter((t) => t.digit < 8).length;
-      const over4Count = recent.filter((t) => t.digit > 4).length;
-      const under5Count = recent.filter((t) => t.digit < 5).length;
-
-      let chosen: { contractType: 'digitover' | 'digitunder'; barrier: number; label: string } | null = null;
-
-      if (strategyMode === 'over1_under8') {
-        const last3 = list.slice(-3);
-        if (over1Count / recent.length >= 0.88 && last3.every((t) => t.digit >= 2)) {
-          chosen = { contractType: 'digitover', barrier: 1, label: 'OVER 1' };
-        } else if (under8Count / recent.length >= 0.88 && last3.every((t) => t.digit <= 7)) {
-          chosen = { contractType: 'digitunder', barrier: 8, label: 'UNDER 8' };
-        }
-      } else {
-        if (over4Count / recent.length >= 0.64) {
-          chosen = { contractType: 'digitover', barrier: 4, label: 'OVER 4' };
-        } else if (under5Count / recent.length >= 0.64) {
-          chosen = { contractType: 'digitunder', barrier: 5, label: 'UNDER 5' };
-        }
+    setBusy(true);
+    try {
+      const res = await fetch('/api/cloud-bots/grid-master/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          markets: markets.map((m) => m.symbol),
+          strategyMode,
+          stake: Math.max(0.35, Number(stake) || 1),
+          martingale: Math.max(1, Number(martingale) || 1),
+          duration: Math.max(1, Math.min(10, Number(duration) || 1)),
+          tp: Math.max(0.5, Number(tp) || 5),
+          sl: Math.max(1, Number(sl) || 15),
+          useVirtual: Boolean(hasVirtualToken && useVirtual),
+          virtualLossTarget: Math.max(0, Math.min(10, Number(virtualLossTarget) || 0)),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setLocalError(data?.error || 'Failed to start Master Bot.');
+      } else if (data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
       }
-
-      if (chosen) {
-        executingRef.current = true;
-        lastTradeAtRef.current = now;
-        const execRealStake = Math.max(0.35, Number((currentStakeRef.current || 1).toFixed(2)));
-        const virtModeEnabled = Boolean(hasVirtualToken && useVirtual);
-        const isVirt = virtModeEnabled && !inRealPhaseRef.current;
-        const durTicks = Math.max(1, Math.min(10, duration));
-
-        const callTradeApi = async (virtualTrade: boolean, tradeStake: number) => {
-          const res = await fetch('/api/autobot/trade', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              symbol: m.symbol,
-              contractType: chosen!.contractType,
-              prediction: chosen!.barrier,
-              stake: virtualTrade ? 0.35 : tradeStake,
-              duration: durTicks,
-              isVirtual: virtualTrade,
-              strategyName: `Grid Master ${chosen!.label}`,
-            }),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || 'Trade execution failed.');
-          return {
-            won: Boolean(data.won),
-            pnl: Number(data.profit || 0),
-          };
-        };
-
-        const runExecution = async () => {
-          let realRes: { won: boolean; pnl: number } | null = null;
-
-          if (isVirt) {
-            setStatusLog(
-              `Signal on ${m.symbol}: ${chosen!.label} (VIRTUAL API) @ $0.35...`
-            );
-            const vOutcome = await callTradeApi(true, 0.35);
-            if (!runningRef.current) return;
-
-            if (vOutcome.won) {
-              vLossStreakRef.current = 0;
-              setVirtualWins((vw) => vw + 1);
-              setStatusLog(`${m.symbol} ${chosen!.label}: VIRTUAL WIN +$${vOutcome.pnl.toFixed(2)} · Streak reset`);
-              return;
-            }
-
-            const nextVStreak = vLossStreakRef.current + 1;
-            vLossStreakRef.current = nextVStreak;
-            setVirtualLosses((vl) => vl + 1);
-
-            if (virtualLossTarget <= 0 || nextVStreak < virtualLossTarget) {
-              setStatusLog(
-                `${m.symbol} ${chosen!.label}: VIRTUAL LOSS (${nextVStreak}${virtualLossTarget > 0 ? `/${virtualLossTarget}` : ''})`
-              );
-              return;
-            }
-
-            // Virtual loss target hit -> Switch to REAL IMMEDIATELY with ZERO lag
-            inRealPhaseRef.current = true;
-            setStatusLog(
-              `${m.symbol} V-Loss ${nextVStreak}/${virtualLossTarget} hit -> Switching to REAL immediately @ $${execRealStake.toFixed(2)}!`
-            );
-            realRes = await callTradeApi(false, execRealStake);
-          } else {
-            setStatusLog(
-              `Signal on ${m.symbol}: ${chosen!.label} (REAL) @ $${execRealStake.toFixed(2)}...`
-            );
-            realRes = await callTradeApi(false, execRealStake);
-          }
-
-          if (!realRes || !runningRef.current) return;
-          const { won, pnl } = realRes;
-          const nextProfit = profitRef.current + pnl;
-          profitRef.current = nextProfit;
-          setProfit(nextProfit);
-
-          if (won) {
-            setWins((w) => w + 1);
-            const resetBase = Math.max(0.35, Number(stake) || 1);
-            currentStakeRef.current = resetBase;
-            setCurrentStake(resetBase);
-            if (virtModeEnabled && virtualLossTarget > 0) {
-              vLossStreakRef.current = 0;
-              inRealPhaseRef.current = false;
-            }
-            setStatusLog(`${m.symbol} ${chosen!.label}: REAL WIN +$${pnl.toFixed(2)}`);
-          } else {
-            setLosses((l) => l + 1);
-            const nextStake = Math.max(
-              0.35,
-              Number((execRealStake * Math.max(1, Number(martingale) || 1)).toFixed(2))
-            );
-            currentStakeRef.current = nextStake;
-            setCurrentStake(nextStake);
-            setStatusLog(`${m.symbol} ${chosen!.label}: REAL LOSS -$${Math.abs(pnl).toFixed(2)} -> Next $${nextStake.toFixed(2)}`);
-          }
-
-          if (nextProfit >= tp) {
-            setStatusLog(`Take Profit reached (+$${nextProfit.toFixed(2)}). Bot stopped.`);
-            runningRef.current = false;
-            setRunning(false);
-          } else if (nextProfit <= -sl) {
-            setStatusLog(`Stop Loss reached (-$${Math.abs(nextProfit).toFixed(2)}). Bot stopped.`);
-            runningRef.current = false;
-            setRunning(false);
-          }
-        };
-
-        runExecution()
-          .catch((err) => {
-            setErrorMsg(err?.message || 'Execution error');
-            runningRef.current = false;
-            setRunning(false);
-          })
-          .finally(() => {
-            executingRef.current = false;
-          });
-        break;
-      }
+    } catch (err: any) {
+      setLocalError(err?.message || 'Failed to start Master Bot.');
+    } finally {
+      setBusy(false);
     }
-  }, [markets, running, strategyMode, duration, stake, martingale, tp, sl, hasVirtualToken, useVirtual, virtualLossTarget]);
+  };
 
   return (
     <div className="rounded-2xl border border-indigo-500/30 bg-[#111217] p-4 shadow-xl space-y-3">

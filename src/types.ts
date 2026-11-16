@@ -1,3 +1,5 @@
+import type { CloudBotsSnapshot } from './types/cloudBots';
+
 export type AuthMode = 'api_token' | 'pat';
 
 export type ExecSpeed = 'normal' | 'fast';
@@ -252,6 +254,7 @@ export interface ActiveTrade {
   ticks: number;
   entrySpot?: number;
   currentSpot?: number;
+  profit?: number;
   timestamp: string;
 }
 
@@ -281,6 +284,7 @@ export interface AppSnapshot {
   settings?: BotSettings;
   multiTicks?: Record<string, TickPoint[]>;
   positions?: OpenPosition[];
+  cloudBots?: CloudBotsSnapshot;
 }
 
 export const DEFAULT_SETTINGS: BotSettings = {

@@ -27,6 +27,7 @@ import {
   DUAL_TYPES,
   VALID_DIGITS,
 } from '../src/types.ts';
+import { CloudBotsManager } from './cloudBots.ts';
 
 const DEFAULT_WS_APP_ID = '1089';
 const PAT_API_URL = 'https://api.derivws.com/trading/v1/options';
@@ -85,6 +86,94 @@ function sleep(ms: number): Promise<void> {
 function detectDemoFromLoginId(loginId: string): boolean {
   const upper = loginId.toUpperCase();
   return upper.startsWith('VR') || upper.startsWith('DOT') || upper.includes('DEMO');
+}
+
+function parseSpotNumber(val: unknown): number | undefined {
+  if (val === undefined || val === null || val === '') return undefined;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+export function extractPocEntrySpot(poc: any): number | undefined {
+  if (!poc || typeof poc !== 'object') return undefined;
+  const fromFields =
+    parseSpotNumber(poc.entry_spot) ??
+    parseSpotNumber(poc.entry_spot_display_value) ??
+    parseSpotNumber(poc.entry_tick) ??
+    parseSpotNumber(poc.entry_tick_display_value);
+  if (fromFields !== undefined) return fromFields;
+
+  const startAudit = Array.isArray(poc.audit_details?.contract_start)
+    ? poc.audit_details.contract_start
+    : null;
+  if (startAudit && startAudit.length > 0) {
+    const startItem =
+      startAudit.find((x: any) => x?.flag === 'highlight_tick') ??
+      startAudit[startAudit.length - 1];
+    const auditSpot =
+      parseSpotNumber(startItem?.tick) ?? parseSpotNumber(startItem?.tick_display_value);
+    if (auditSpot !== undefined) return auditSpot;
+  }
+  if (Array.isArray(poc.tick_stream) && poc.tick_stream.length > 0) {
+    const firstTick = poc.tick_stream[0];
+    const tsSpot =
+      parseSpotNumber(firstTick?.tick) ?? parseSpotNumber(firstTick?.tick_display_value);
+    if (tsSpot !== undefined) return tsSpot;
+  }
+  if (poc.is_sold) {
+    return parseSpotNumber(poc.spot) ?? parseSpotNumber(poc.spot_display_value);
+  }
+  return undefined;
+}
+
+export function extractPocExitSpot(poc: any, lastCurrentSpot?: number): number | undefined {
+  if (!poc || typeof poc !== 'object') return undefined;
+  const fromFields =
+    parseSpotNumber(poc.exit_spot) ??
+    parseSpotNumber(poc.exit_spot_display_value) ??
+    parseSpotNumber(poc.exit_tick) ??
+    parseSpotNumber(poc.exit_tick_display_value) ??
+    (poc.is_sold ? parseSpotNumber(poc.sell_spot) : undefined);
+  if (fromFields !== undefined) return fromFields;
+
+  const endAudit = Array.isArray(poc.audit_details?.contract_end)
+    ? poc.audit_details.contract_end
+    : null;
+  if (endAudit && endAudit.length > 0) {
+    const highlight =
+      endAudit.find(
+        (x: any) =>
+          x?.flag === 'highlight_tick' &&
+          (parseSpotNumber(x?.tick) !== undefined ||
+            parseSpotNumber(x?.tick_display_value) !== undefined)
+      ) ??
+      [...endAudit]
+        .reverse()
+        .find(
+          (x: any) =>
+            parseSpotNumber(x?.tick) !== undefined ||
+            parseSpotNumber(x?.tick_display_value) !== undefined
+        );
+    const auditSpot =
+      parseSpotNumber(highlight?.tick) ?? parseSpotNumber(highlight?.tick_display_value);
+    if (auditSpot !== undefined) return auditSpot;
+  }
+
+  if (poc.is_sold) {
+    if (Array.isArray(poc.tick_stream) && poc.tick_stream.length > 0) {
+      const lastTick = poc.tick_stream[poc.tick_stream.length - 1];
+      const tsSpot =
+        parseSpotNumber(lastTick?.tick) ?? parseSpotNumber(lastTick?.tick_display_value);
+      if (tsSpot !== undefined) return tsSpot;
+    }
+    const curSpot =
+      parseSpotNumber(poc.current_spot) ?? parseSpotNumber(poc.current_spot_display_value);
+    if (curSpot !== undefined) return curSpot;
+    if (lastCurrentSpot !== undefined && Number.isFinite(lastCurrentSpot)) {
+      return lastCurrentSpot;
+    }
+  }
+  return undefined;
 }
 
 interface PendingReq {
@@ -252,6 +341,16 @@ class DerivWsConnection {
     });
   }
 
+  sendFireAndForget(payload: Record<string, unknown>): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    try {
+      const reqId = this.nextReqId++;
+      this.ws.send(JSON.stringify({ ...payload, req_id: reqId }));
+    } catch {
+      // ignore send errors on fire-and-forget cleanup
+    }
+  }
+
   async close(): Promise<void> {
     this.closedByCaller = true;
     if (this.abortConnect) {
@@ -315,12 +414,14 @@ export class DerivBotEngine {
   private trades: TradeRecord[] = [];
   private logs: LogEntry[] = [];
   private cfCache = new Map<string, any[]>();
+  private unsupportedDirectBuy = new Set<string>();
 
   private session: SessionStats = this.createIdleSession();
   private activeTrade: ActiveTrade | null = null;
   private stopRequested = false;
   private activeLoopPromise: Promise<void> | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
+  public readonly cloudBots: CloudBotsManager;
 
   constructor() {
     this.loadStrategies();
@@ -328,6 +429,16 @@ export class DerivBotEngine {
     if (this.settings.market && MARKET_DECIMALS[this.settings.market]) {
       this.tickMarket = this.settings.market;
     }
+    this.cloudBots = new CloudBotsManager({
+      isAccountConnected: () => Boolean(this.account?.connected),
+      getAccountBalance: () => Number(this.account?.balance ?? 0),
+      getAccountCurrency: () => this.account?.currency ?? this.session.currency ?? 'USD',
+      hasVirtualToken: () => this.hasVirtualToken(),
+      executeAutoBotTrade: (params) => this.executeAutoBotTrade(params),
+      emitCloudBots: (snapshot) => this.emit('cloud_bots', snapshot),
+      addLog: (level, message) => this.addLog(level, message),
+      isFastExecution: () => this.isFastExecution(),
+    });
     this.startTickStream(this.tickMarket).catch(() => {});
     this.restorePersistedConnection().catch(() => {});
   }
@@ -372,7 +483,7 @@ export class DerivBotEngine {
     }
   }
 
-  private addLog(level: LogEntry['level'], message: string): void {
+  public addLog(level: LogEntry['level'], message: string): void {
     const entry: LogEntry = {
       id: crypto.randomUUID(),
       timestamp: nowIso(),
@@ -411,6 +522,7 @@ export class DerivBotEngine {
       settings: this.settings,
       multiTicks: this.multiTicks,
       positions: Array.from(this.positions.values()),
+      cloudBots: this.cloudBots.getSnapshot(),
     };
   }
 
@@ -438,6 +550,10 @@ export class DerivBotEngine {
 
   getSettings(): BotSettings {
     return this.settings;
+  }
+
+  isFastExecution(): boolean {
+    return this.settings.exec === 'fast';
   }
 
   saveSettings(next: BotSettings): BotSettings {
@@ -949,8 +1065,8 @@ export class DerivBotEngine {
             this.subscribedPositionIds.delete(cid);
             this.emit('mt_closed', {
               ...pos,
-              entrySpot: poc.entry_tick_display_value || poc.entry_spot,
-              exitSpot: poc.exit_tick_display_value || poc.exit_tick,
+              entrySpot: extractPocEntrySpot(poc) ?? poc.entry_tick_display_value ?? poc.entry_spot,
+              exitSpot: extractPocExitSpot(poc) ?? poc.exit_tick_display_value ?? poc.exit_tick,
               timestamp: nowIso(),
             });
           } else {
@@ -1608,106 +1724,259 @@ export class DerivBotEngine {
     conn: DerivWsConnection,
     contractIds: string[],
     ensureConn: () => Promise<DerivWsConnection>,
-    onEntrySpot?: (entrySpot: number, currentSpot?: number) => void
+    onEntrySpot?: (entrySpot: number, currentSpot?: number, profit?: number) => void,
+    opts?: { bufferedPocs?: any[] }
   ): Promise<{ profits: Record<string, number>; entrySpot?: number; exitSpot?: number }> {
     const profits: Record<string, number> = {};
     let entrySpot: number | undefined;
     let exitSpot: number | undefined;
+    let lastCurrentSpot: number | undefined;
     let activeConn = conn;
+    const seenPocIds = new Set<string>();
+    const pocSubIds = new Set<string>();
 
-    while (Object.keys(profits).length < contractIds.length) {
-      const unsubRef: { fn: (() => void) | null } = { fn: null };
+    const processPoc = (poc: any) => {
+      if (!poc || !contractIds.includes(String(poc.contract_id))) return;
+      seenPocIds.add(String(poc.contract_id));
 
-      try {
-        await new Promise<void>(async (resolve, reject) => {
-          const timeout = setTimeout(() => {
-            unsubRef.fn?.();
-            reject(new Error('Contract settlement timed out'));
-          }, 90_000);
+      const cur =
+        parseSpotNumber(poc.current_spot) ??
+        parseSpotNumber(poc.current_spot_display_value);
+      if (cur !== undefined) {
+        lastCurrentSpot = cur;
+      }
+      const liveProfit = parseSpotNumber(poc.profit);
 
-          unsubRef.fn = activeConn.onMessage((msg) => {
-            if (msg.error) {
-              clearTimeout(timeout);
+      const detectedEntry = extractPocEntrySpot(poc);
+      if (detectedEntry !== undefined) {
+        entrySpot = detectedEntry;
+        onEntrySpot?.(entrySpot, cur, liveProfit);
+      } else if ((cur !== undefined || liveProfit !== undefined) && entrySpot !== undefined) {
+        onEntrySpot?.(entrySpot, cur ?? lastCurrentSpot, liveProfit);
+      }
+
+      const detectedExit = extractPocExitSpot(poc, lastCurrentSpot);
+      if (detectedExit !== undefined) {
+        exitSpot = detectedExit;
+      }
+
+      if (poc.is_sold) {
+        profits[String(poc.contract_id)] = Number(poc.profit);
+      }
+    };
+
+    try {
+      if (opts?.bufferedPocs) {
+        for (const bp of opts.bufferedPocs) {
+          processPoc(bp);
+        }
+      }
+
+      while (Object.keys(profits).length < contractIds.length) {
+        const unsubRef: { fn: (() => void) | null } = { fn: null };
+
+        try {
+          await new Promise<void>(async (resolve, reject) => {
+            const timeout = setTimeout(() => {
               unsubRef.fn?.();
-              reject(new Error(msg.error.message));
-              return;
-            }
-            const poc = msg.proposal_open_contract;
-            if (poc && contractIds.includes(String(poc.contract_id))) {
-              if (poc.entry_spot !== undefined) {
-                entrySpot = Number(poc.entry_spot);
-                onEntrySpot?.(
-                  entrySpot,
-                  poc.current_spot !== undefined ? Number(poc.current_spot) : undefined
-                );
-              } else if (poc.current_spot !== undefined && entrySpot !== undefined) {
-                onEntrySpot?.(entrySpot, Number(poc.current_spot));
+              reject(new Error('Contract settlement timed out'));
+            }, 90_000);
+
+            unsubRef.fn = activeConn.onMessage((msg) => {
+              if (msg.error) {
+                clearTimeout(timeout);
+                unsubRef.fn?.();
+                reject(new Error(msg.error.message));
+                return;
               }
-              if (poc.exit_tick !== undefined) exitSpot = Number(poc.exit_tick);
-              if (poc.is_sold) {
-                profits[String(poc.contract_id)] = Number(poc.profit);
+              const poc = msg.proposal_open_contract;
+              if (poc && contractIds.includes(String(poc.contract_id))) {
+                if (msg.subscription?.id) {
+                  pocSubIds.add(String(msg.subscription.id));
+                }
+                processPoc(poc);
                 if (Object.keys(profits).length >= contractIds.length) {
                   clearTimeout(timeout);
                   unsubRef.fn?.();
                   resolve();
                 }
               }
+            });
+
+            const pendingSubscribeCids = contractIds.filter(
+              (cid) => profits[cid] === undefined && !seenPocIds.has(cid)
+            );
+            if (pendingSubscribeCids.length > 0) {
+              const subResults = await Promise.all(
+                pendingSubscribeCids.map((cid) =>
+                  activeConn
+                    .request({
+                      proposal_open_contract: 1,
+                      contract_id: Number(cid) || cid,
+                      subscribe: 1,
+                    })
+                    .catch((err) => ({ error: { message: err.message } }))
+                )
+              );
+
+              for (const subRes of subResults) {
+                if (subRes?.error) {
+                  clearTimeout(timeout);
+                  unsubRef.fn?.();
+                  reject(new Error(subRes.error.message));
+                  return;
+                }
+                if (subRes?.subscription?.id) {
+                  pocSubIds.add(String(subRes.subscription.id));
+                }
+                if (subRes?.proposal_open_contract) {
+                  processPoc(subRes.proposal_open_contract);
+                }
+              }
+            }
+
+            if (Object.keys(profits).length >= contractIds.length) {
+              clearTimeout(timeout);
+              unsubRef.fn?.();
+              resolve();
             }
           });
-
-          for (const cid of contractIds) {
-            if (profits[cid] === undefined) {
-              const subRes = await activeConn
-                .request({
-                  proposal_open_contract: 1,
-                  contract_id: Number(cid) || cid,
-                  subscribe: 1,
-                })
-                .catch((err) => ({ error: { message: err.message } }));
-
-              if (subRes?.error) {
-                clearTimeout(timeout);
-                unsubRef.fn?.();
-                reject(new Error(subRes.error.message));
-                return;
-              }
-              const poc = subRes?.proposal_open_contract;
-              if (poc) {
-                if (poc.entry_spot !== undefined) {
-                  entrySpot = Number(poc.entry_spot);
-                  onEntrySpot?.(
-                    entrySpot,
-                    poc.current_spot !== undefined ? Number(poc.current_spot) : undefined
-                  );
-                }
-                if (poc.exit_tick !== undefined) exitSpot = Number(poc.exit_tick);
-                if (poc.is_sold) {
-                  profits[String(poc.contract_id)] = Number(poc.profit);
-                }
-              }
-            }
+        } catch (err: any) {
+          unsubRef.fn?.();
+          if (this.stopRequested) throw err;
+          if (err?.message?.includes('closed') || err?.message?.includes('not connected')) {
+            this.addLog('warn', 'Connection interrupted while monitoring contract. Reconnecting...');
+            activeConn = await ensureConn();
+            continue;
           }
-
-          if (Object.keys(profits).length >= contractIds.length) {
-            clearTimeout(timeout);
-            unsubRef.fn?.();
-            resolve();
-          }
-        });
-      } catch (err: any) {
-        unsubRef.fn?.();
-        if (this.stopRequested) throw err;
-        // Reconnect and re-subscribe on socket drop
-        if (err?.message?.includes('closed') || err?.message?.includes('not connected')) {
-          this.addLog('warn', 'Connection interrupted while monitoring contract. Reconnecting...');
-          activeConn = await ensureConn();
-          continue;
+          throw err;
         }
-        throw err;
+      }
+
+      if (this.isFastExecution() && lastCurrentSpot !== undefined) {
+        if (entrySpot === undefined) entrySpot = lastCurrentSpot;
+        if (exitSpot === undefined) exitSpot = lastCurrentSpot;
+      }
+
+      if ((exitSpot === undefined || entrySpot === undefined) && contractIds.length > 0 && activeConn.isOpen()) {
+        const cid = contractIds[contractIds.length - 1];
+        const finalRes = await Promise.race([
+          activeConn
+            .request({
+              proposal_open_contract: 1,
+              contract_id: Number(cid) || cid,
+            })
+            .catch(() => null),
+          sleep(2500).then(() => null),
+        ]);
+        const finalPoc = finalRes?.proposal_open_contract;
+        if (finalPoc) {
+          if (entrySpot === undefined) {
+            entrySpot = extractPocEntrySpot(finalPoc);
+          }
+          if (exitSpot === undefined) {
+            exitSpot = extractPocExitSpot(finalPoc, lastCurrentSpot);
+          }
+        }
+      }
+
+      if (exitSpot === undefined && lastCurrentSpot !== undefined) {
+        exitSpot = lastCurrentSpot;
+      }
+
+      return { profits, entrySpot, exitSpot };
+    } finally {
+      for (const subId of pocSubIds) {
+        activeConn.sendFireAndForget({ forget: subId });
       }
     }
+  }
 
-    return { profits, entrySpot, exitSpot };
+  private async buyAndTrackSingleContract(
+    conn: DerivWsConnection,
+    proposalReq: Record<string, unknown>,
+    stake: number,
+    authMode: AuthMode,
+    ensureConn: () => Promise<DerivWsConnection>,
+    onPurchased?: (contractIds: string[]) => void,
+    onEntrySpot?: (entrySpot: number, currentSpot?: number, profit?: number) => void
+  ): Promise<{
+    profit: number;
+    contractIds: string[];
+    entrySpot?: number;
+    exitSpot?: number;
+  }> {
+    const bufferedPocs: any[] = [];
+    const preUnsub = conn.onMessage((msg) => {
+      if (msg?.proposal_open_contract) {
+        bufferedPocs.push(msg.proposal_open_contract);
+      }
+    });
+
+    try {
+      const ctypeKey = String(proposalReq.contract_type || 'UNKNOWN');
+      const directKey = `${authMode}:${ctypeKey}`;
+      let buyRes: any = null;
+
+      if (this.isFastExecution() && !this.unsupportedDirectBuy.has(directKey)) {
+        const { proposal: _omit, ...parameters } = proposalReq;
+        const directRes = await conn
+          .request({
+            buy: 1,
+            price: stake,
+            parameters,
+          })
+          .catch(() => null);
+
+        if (directRes && !directRes.error && directRes.buy?.contract_id) {
+          buyRes = directRes;
+        } else if (directRes?.error) {
+          const code = String(directRes.error.code || '');
+          if (
+            code === 'InsufficientBalance' ||
+            code === 'MarketIsClosed' ||
+            code === 'RateLimit' ||
+            code === 'AuthorizationRequired' ||
+            code === 'InvalidToken'
+          ) {
+            throw new Error(directRes.error.message);
+          }
+          this.unsupportedDirectBuy.add(directKey);
+        }
+      }
+
+      if (!buyRes) {
+        const prop = await conn.request(proposalReq);
+        if (prop.error) {
+          throw new Error(prop.error.message);
+        }
+        const propId = prop.proposal?.id;
+        if (!propId) {
+          throw new Error('Proposal ID missing from Deriv response.');
+        }
+
+        const subBuyRes = await conn.request({ buy: propId, price: stake });
+        if (subBuyRes.error) {
+          throw new Error(subBuyRes.error.message);
+        }
+        buyRes = subBuyRes;
+      }
+
+      const cid = String(buyRes.buy.contract_id);
+      onPurchased?.([cid]);
+      preUnsub();
+      const settled = await this.waitSettled(conn, [cid], ensureConn, onEntrySpot, {
+        bufferedPocs,
+      });
+      return {
+        profit: settled.profits[cid] ?? 0,
+        contractIds: [cid],
+        entrySpot: settled.entrySpot,
+        exitSpot: settled.exitSpot,
+      };
+    } finally {
+      preUnsub();
+    }
   }
 
   private async executeSingleContract(
@@ -1721,7 +1990,7 @@ export class DerivBotEngine {
     authMode: AuthMode,
     ensureConn: () => Promise<DerivWsConnection>,
     onPurchased?: (contractIds: string[]) => void,
-    onEntrySpot?: (entrySpot: number, currentSpot?: number) => void
+    onEntrySpot?: (entrySpot: number, currentSpot?: number, profit?: number) => void
   ): Promise<{
     profit: number;
     contractIds: string[];
@@ -1733,30 +2002,15 @@ export class DerivBotEngine {
     }
 
     const req = this.buildProposal(s, t, param, stake, currency, ticks, authMode);
-    const prop = await conn.request(req);
-    if (prop.error) {
-      throw new Error(prop.error.message);
-    }
-
-    const propId = prop.proposal?.id;
-    if (!propId) {
-      throw new Error('Proposal ID missing from Deriv response.');
-    }
-
-    const buyRes = await conn.request({ buy: propId, price: stake });
-    if (buyRes.error) {
-      throw new Error(buyRes.error.message);
-    }
-
-    const cid = String(buyRes.buy.contract_id);
-    onPurchased?.([cid]);
-    const settled = await this.waitSettled(conn, [cid], ensureConn, onEntrySpot);
-    return {
-      profit: settled.profits[cid] ?? 0,
-      contractIds: [cid],
-      entrySpot: settled.entrySpot,
-      exitSpot: settled.exitSpot,
-    };
+    return this.buyAndTrackSingleContract(
+      conn,
+      req,
+      stake,
+      authMode,
+      ensureConn,
+      onPurchased,
+      onEntrySpot
+    );
   }
 
   private async executeDualContract(
@@ -1769,7 +2023,7 @@ export class DerivBotEngine {
     authMode: AuthMode,
     ensureConn: () => Promise<DerivWsConnection>,
     onPurchased?: (contractIds: string[]) => void,
-    onEntrySpot?: (entrySpot: number, currentSpot?: number) => void
+    onEntrySpot?: (entrySpot: number, currentSpot?: number, profit?: number) => void
   ): Promise<{
     profit: number;
     legs: number[];
@@ -1807,35 +2061,49 @@ export class DerivBotEngine {
       }
     }
 
-    const buys = await Promise.all(
-      props.map((p) => conn.request({ buy: p.proposal.id, price: stake }))
-    );
+    const bufferedPocs: any[] = [];
+    const preUnsub = conn.onMessage((msg) => {
+      if (msg?.proposal_open_contract) {
+        bufferedPocs.push(msg.proposal_open_contract);
+      }
+    });
 
-    const cids: string[] = [];
-    const errs: string[] = [];
-    for (const b of buys) {
-      if (b.error) errs.push(b.error.message);
-      else cids.push(String(b.buy.contract_id));
-    }
-    if (cids.length === 0) {
-      throw new Error(errs[0] || 'Failed to buy dual legs');
-    }
+    try {
+      const buys = await Promise.all(
+        props.map((p) => conn.request({ buy: p.proposal.id, price: stake }))
+      );
 
-    onPurchased?.(cids);
-    const settled = await this.waitSettled(conn, cids, ensureConn, onEntrySpot);
-    if (errs.length > 0) {
-      const partial = cids.reduce((acc, c) => acc + (settled.profits[c] ?? 0), 0);
-      throw new Error(`One leg failed (${errs[0]}). Other leg settled ${partial >= 0 ? '+' : ''}${partial.toFixed(2)}.`);
-    }
+      const cids: string[] = [];
+      const errs: string[] = [];
+      for (const b of buys) {
+        if (b.error) errs.push(b.error.message);
+        else cids.push(String(b.buy.contract_id));
+      }
+      if (cids.length === 0) {
+        throw new Error(errs[0] || 'Failed to buy dual legs');
+      }
 
-    const legProfits = cids.map((c) => settled.profits[c] ?? 0);
-    return {
-      profit: legProfits.reduce((a, b) => a + b, 0),
-      legs: legProfits,
-      contractIds: cids,
-      entrySpot: settled.entrySpot,
-      exitSpot: settled.exitSpot,
-    };
+      onPurchased?.(cids);
+      preUnsub();
+      const settled = await this.waitSettled(conn, cids, ensureConn, onEntrySpot, {
+        bufferedPocs,
+      });
+      if (errs.length > 0) {
+        const partial = cids.reduce((acc, c) => acc + (settled.profits[c] ?? 0), 0);
+        throw new Error(`One leg failed (${errs[0]}). Other leg settled ${partial >= 0 ? '+' : ''}${partial.toFixed(2)}.`);
+      }
+
+      const legProfits = cids.map((c) => settled.profits[c] ?? 0);
+      return {
+        profit: legProfits.reduce((a, b) => a + b, 0),
+        legs: legProfits,
+        contractIds: cids,
+        entrySpot: settled.entrySpot,
+        exitSpot: settled.exitSpot,
+      };
+    } finally {
+      preUnsub();
+    }
   }
 
   private async simulateVirtualTradeOnLiveTicks(
@@ -2248,7 +2516,7 @@ export class DerivBotEngine {
             continue;
           }
 
-          if (!fast && !this.stopRequested) {
+          if (!this.isFastExecution() && !this.stopRequested) {
             await sleep(900);
           }
           continue;
@@ -2300,12 +2568,13 @@ export class DerivBotEngine {
           emitActiveContract(cids);
         };
 
-        const handleEntrySpot = (entry: number, current?: number) => {
+        const handleEntrySpot = (entry: number, current?: number, liveProfit?: number) => {
           if (this.activeTrade && this.activeTrade.id === activeId) {
             this.setActiveTrade({
               ...this.activeTrade,
               entrySpot: entry,
               currentSpot: current,
+              profit: liveProfit,
             });
           }
         };
@@ -2348,14 +2617,13 @@ export class DerivBotEngine {
           exitSpot = res.exitSpot;
         }
 
-        this.setActiveTrade(null);
         total = Number((total + profit).toFixed(2));
         const won = profit > 0;
         seq += 1;
         const payout = profit > 0 ? Number((effectiveStake + profit).toFixed(2)) : 0;
 
         let balanceAfter = this.account?.balance;
-        if (!fast) {
+        if (!this.isFastExecution()) {
           try {
             const refreshed = await this.refreshBalance();
             balanceAfter = refreshed.balance;
@@ -2365,7 +2633,7 @@ export class DerivBotEngine {
         }
 
         const record: TradeRecord = {
-          id: crypto.randomUUID(),
+          id: activeId,
           seq,
           timestamp: nowIso(),
           isVirtual: false,
@@ -2401,6 +2669,7 @@ export class DerivBotEngine {
         };
 
         this.emit('trade', record);
+        this.setActiveTrade(null);
         this.emit('session', this.session);
         this.addLog(
           won ? 'win' : 'loss',
@@ -2469,12 +2738,12 @@ export class DerivBotEngine {
           }
         }
 
-        if (!fast && !this.stopRequested) {
-          await sleep(1000);
+        if (!this.isFastExecution() && !this.stopRequested) {
+          await sleep(1200);
         }
       }
 
-      if (fast) {
+      if (this.isFastExecution()) {
         await this.refreshBalance().catch(() => {});
       }
 
@@ -2663,12 +2932,13 @@ export class DerivBotEngine {
       this.emit('session', this.session);
     };
 
-    const onEntrySpot = (entry: number, current?: number) => {
+    const onEntrySpot = (entry: number, current?: number, liveProfit?: number) => {
       if (this.activeTrade && this.activeTrade.id === activeId) {
         this.setActiveTrade({
           ...this.activeTrade,
           entrySpot: entry,
           currentSpot: current,
+          profit: liveProfit,
         });
       }
     };
@@ -2707,26 +2977,40 @@ export class DerivBotEngine {
             throw new Error(`${legDefs[i].ctype} ${legDefs[i].barrier}: ${props[i].error.message}`);
           }
         }
-        const buys = await Promise.all(
-          props.map((p) => conn.request({ buy: p.proposal.id, price: stake }))
-        );
-        const errs: string[] = [];
-        for (const b of buys) {
-          if (b.error) errs.push(b.error.message);
-          else cids.push(String(b.buy.contract_id));
+
+        const bufferedPocs: any[] = [];
+        const preUnsub = conn.onMessage((msg) => {
+          if (msg?.proposal_open_contract) {
+            bufferedPocs.push(msg.proposal_open_contract);
+          }
+        });
+        try {
+          const buys = await Promise.all(
+            props.map((p) => conn.request({ buy: p.proposal.id, price: stake }))
+          );
+          const errs: string[] = [];
+          for (const b of buys) {
+            if (b.error) errs.push(b.error.message);
+            else cids.push(String(b.buy.contract_id));
+          }
+          if (cids.length === 0) {
+            throw new Error(errs[0] || 'Failed to purchase dual Over/Under legs.');
+          }
+          emitActive(cids);
+          preUnsub();
+          const settled = await this.waitSettled(conn, cids, ensureTargetConn, onEntrySpot, {
+            bufferedPocs,
+          });
+          if (errs.length > 0) {
+            throw new Error(`One Dual O/U leg failed: ${errs[0]}`);
+          }
+          legs = cids.map((c) => settled.profits[c] ?? 0);
+          profit = Number(legs.reduce((a, b) => a + b, 0).toFixed(2));
+          entrySpot = settled.entrySpot;
+          exitSpot = settled.exitSpot;
+        } finally {
+          preUnsub();
         }
-        if (cids.length === 0) {
-          throw new Error(errs[0] || 'Failed to purchase dual Over/Under legs.');
-        }
-        emitActive(cids);
-        const settled = await this.waitSettled(conn, cids, ensureTargetConn, onEntrySpot);
-        if (errs.length > 0) {
-          throw new Error(`One Dual O/U leg failed: ${errs[0]}`);
-        }
-        legs = cids.map((c) => settled.profits[c] ?? 0);
-        profit = Number(legs.reduce((a, b) => a + b, 0).toFixed(2));
-        entrySpot = settled.entrySpot;
-        exitSpot = settled.exitSpot;
       } else {
         const proposalReq: Record<string, unknown> =
           ctype === 'accumulator'
@@ -2763,25 +3047,22 @@ export class DerivBotEngine {
                 barrier: String(Math.max(0, Math.min(9, Math.round(params.prediction)))),
               };
 
-        const prop = await conn.request(proposalReq);
-        if (prop.error) {
-          throw new Error(prop.error.message);
-        }
-        const propId = prop.proposal?.id;
-        if (!propId) {
-          throw new Error('Proposal ID missing from Deriv response.');
-        }
-        const buyRes = await conn.request({ buy: propId, price: stake });
-        if (buyRes.error) {
-          throw new Error(buyRes.error.message);
-        }
-        const cid = String(buyRes.buy.contract_id);
-        cids = [cid];
-        emitActive(cids);
-        const settled = await this.waitSettled(conn, cids, ensureTargetConn, onEntrySpot);
-        profit = Number((settled.profits[cid] ?? 0).toFixed(2));
-        entrySpot = settled.entrySpot;
-        exitSpot = settled.exitSpot;
+        const res = await this.buyAndTrackSingleContract(
+          conn,
+          proposalReq,
+          stake,
+          authMode,
+          ensureTargetConn,
+          (purchasedIds) => {
+            cids = purchasedIds;
+            emitActive(purchasedIds);
+          },
+          onEntrySpot
+        );
+        cids = res.contractIds;
+        profit = Number(res.profit.toFixed(2));
+        entrySpot = res.entrySpot;
+        exitSpot = res.exitSpot;
       }
 
       const won = profit > 0;
@@ -2850,7 +3131,7 @@ export class DerivBotEngine {
 
       const nextSeq = (this.trades[0]?.seq ?? 0) + 1;
       const record: TradeRecord = {
-        id: crypto.randomUUID(),
+        id: activeId,
         seq: nextSeq,
         timestamp: nowIso(),
         isVirtual,
@@ -2875,6 +3156,7 @@ export class DerivBotEngine {
 
       this.trades = [record, ...this.trades].slice(0, 500);
       this.emit('trade', record);
+      this.setActiveTrade(null);
       this.emit('session', this.session);
       this.addLog(
         won ? 'win' : 'loss',

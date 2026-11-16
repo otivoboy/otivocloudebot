@@ -1,0 +1,28 @@
+{
+  "market": "1HZ25V",
+  "exec": "fast",
+  "mode": "single",
+  "types": [
+    "Differs"
+  ],
+  "digits": {
+    "Over": 4
+  },
+  "barriers": {
+    "Higher": "+0.5",
+    "Lower": "-0.5"
+  },
+  "growth": 0.02,
+  "atp": 1,
+  "stake": 1,
+  "ticks": 1,
+  "mart": true,
+  "mult": 15,
+  "martTickStep": 0,
+  "martTicks": 2,
+  "virtual": false,
+  "vneed": 2,
+  "cont": true,
+  "tp": 10,
+  "sl": 20
+}

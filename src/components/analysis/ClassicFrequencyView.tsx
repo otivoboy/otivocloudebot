@@ -23,6 +23,7 @@ import {
   SignalRow,
 } from './AnalysisCharts';
 import { DerivContractAnalysisType, TickData } from './types';
+import type { CloudBotsSnapshot, FrequencyCloudState } from '../../types/cloudBots';
 
 export interface ClassicAnalysisResult {
   frequencies: number[];
@@ -81,6 +82,8 @@ interface ClassicFrequencyViewProps {
   onTriggerBackgroundRescan: (excludeSymbol?: string) => Promise<string | null>;
   onNotify: (level: 'success' | 'info' | 'warn' | 'error', msg: string) => void;
   hasVirtualToken?: boolean;
+  cloudState?: FrequencyCloudState;
+  onCloudBotsUpdate?: (snap: CloudBotsSnapshot) => void;
 }
 
 export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
@@ -102,11 +105,11 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
   onStartAutoTrade,
   onStopAutoTrade,
   onLoadSignalToTerminal,
-  onTriggerBackgroundRescan,
   onNotify,
   hasVirtualToken = false,
+  cloudState,
+  onCloudBotsUpdate,
 }) => {
-  const [isFrequencyBotTrading, setIsFrequencyBotTrading] = useState(false);
   const [frequencyBotStake, setFrequencyBotStake] = useState(() =>
     parseFloat(localStorage.getItem('freq_bot_stake') || '1')
   );
@@ -138,8 +141,6 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
   const [frequencyBotSl, setFrequencyBotSl] = useState(() =>
     parseFloat(localStorage.getItem('freq_bot_sl') || '50')
   );
-  const [frequencyBotWins, setFrequencyBotWins] = useState(0);
-  const [frequencyBotLosses, setFrequencyBotLosses] = useState(0);
   const [frequencyBotDuration, setFrequencyBotDuration] = useState(() =>
     parseInt(localStorage.getItem('freq_bot_duration') || '1', 10)
   );
@@ -196,19 +197,39 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
   const [frequencyBotVirtualLossesTarget, setFrequencyBotVirtualLossesTarget] = useState(() =>
     Math.max(1, parseInt(localStorage.getItem('freq_bot_virtual_losses_target') || '1', 10) || 1)
   );
-  const [frequencyBotVirtualWins, setFrequencyBotVirtualWins] = useState(0);
-  const [frequencyBotVirtualLosses, setFrequencyBotVirtualLosses] = useState(0);
 
-  // Refs for real-time match & execution control
-  const tradingRef = useRef(false);
-  const executingRef = useRef(false);
-  const currentStakeRef = useRef(frequencyBotStake);
-  const sessionProfitRef = useRef(0);
-  const winsRef = useRef(0);
-  const consecutiveLossesRef = useRef(0);
-  const lastTradeAtRef = useRef(0);
-  const vLossStreakRef = useRef(0);
-  const inRealPhaseRef = useRef(true);
+  const isFrequencyBotTrading = Boolean(cloudState?.running);
+  const effectiveSessionProfit = cloudState?.sessionProfit ?? frequencyBotSessionProfit;
+  const frequencyBotWins = cloudState?.wins ?? 0;
+  const frequencyBotLosses = cloudState?.losses ?? 0;
+  const frequencyBotVirtualWins = cloudState?.virtualWins ?? 0;
+  const frequencyBotVirtualLosses = cloudState?.virtualLosses ?? 0;
+
+  const lastCloudToastIdRef = useRef<number>(cloudState?.lastEvent?.id ?? 0);
+  const lastCloudSymbolRef = useRef<string | null>(cloudState?.symbol ?? null);
+
+  useEffect(() => {
+    setFrequencyBotSessionProfit(cloudState?.sessionProfit ?? 0);
+  }, [cloudState?.sessionProfit]);
+
+  useEffect(() => {
+    const evt = cloudState?.lastEvent;
+    if (evt && evt.id > lastCloudToastIdRef.current) {
+      lastCloudToastIdRef.current = evt.id;
+      onNotify(evt.type, evt.message);
+    }
+  }, [cloudState?.lastEvent, onNotify]);
+
+  useEffect(() => {
+    if (cloudState?.running && cloudState.symbol && cloudState.symbol !== lastCloudSymbolRef.current) {
+      lastCloudSymbolRef.current = cloudState.symbol;
+      if (cloudState.symbol !== symbol) {
+        onChangeSymbol(cloudState.symbol);
+      }
+    } else if (!cloudState?.running) {
+      lastCloudSymbolRef.current = null;
+    }
+  }, [cloudState?.running, cloudState?.symbol, onChangeSymbol, symbol]);
 
   // Persist inputs
   useEffect(() => {
@@ -307,7 +328,6 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
   useEffect(() => {
     if (!hasVirtualToken && frequencyBotVirtualMode) {
       setFrequencyBotVirtualMode(false);
-      inRealPhaseRef.current = true;
     }
   }, [hasVirtualToken, frequencyBotVirtualMode]);
 
@@ -328,13 +348,22 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
     isFrequencyBotTrading,
   ]);
 
-  const stopFrequencyBot = () => {
-    tradingRef.current = false;
-    setIsFrequencyBotTrading(false);
-    onNotify('info', 'Digit Frequency Bot stopped.');
+  const stopFrequencyBot = async () => {
+    try {
+      const res = await fetch('/api/cloud-bots/frequency/stop', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        onNotify('error', data?.error || 'Failed to stop Frequency Bot.');
+      } else {
+        if (data?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(data.cloudBots);
+        onNotify('info', 'Digit Frequency Bot stopped.');
+      }
+    } catch (err: any) {
+      onNotify('error', err?.message || 'Failed to stop Frequency Bot.');
+    }
   };
 
-  const startFrequencyBot = () => {
+  const startFrequencyBot = async () => {
     if (!connected) {
       onNotify('error', 'Connect your Deriv API token via Deriv API Connection first.');
       return;
@@ -353,354 +382,55 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
       setFrequencyBotStake(initialStake);
     }
 
-    tradingRef.current = true;
-    executingRef.current = false;
-    currentStakeRef.current = initialStake;
-    sessionProfitRef.current = 0;
-    winsRef.current = 0;
-    consecutiveLossesRef.current = 0;
-    lastTradeAtRef.current = 0;
-    vLossStreakRef.current = 0;
-    const virtActive = Boolean(hasVirtualToken && frequencyBotVirtualMode);
-    inRealPhaseRef.current = !virtActive;
-
-    setFrequencyBotWins(0);
-    setFrequencyBotLosses(0);
-    setFrequencyBotVirtualWins(0);
-    setFrequencyBotVirtualLosses(0);
-    setFrequencyBotSessionProfit(0);
-    setIsFrequencyBotTrading(true);
-
-    onNotify('success', `Exact Frequency Match Bot started on ${symbol}.`);
-  };
-
-  // Frequency Match & Direct Execution Loop via POST /api/autobot/trade
-  useEffect(() => {
-    if (!isFrequencyBotTrading || !analysis || executingRef.current) return;
-    const cooldownMs = consecutiveLossesRef.current > 0 ? 0 : 400;
-    if (Date.now() - lastTradeAtRef.current < cooldownMs) return;
-
-    const isRecovery = frequencyBotSmartRecoveryEnabled && consecutiveLossesRef.current > 0;
-    const strategy = isRecovery ? frequencyBotRecoveryContractType : frequencyBotContractType;
-
-    let matchedDigit: number | null = null;
-    let matchReason = '';
-
-    if (frequencyBotCircleModeEnabled) {
-      const circleStyle = isRecovery ? frequencyBotRecoveryCircleType : frequencyBotCircleType;
-      let targetDigit = analysis.leastFrequent;
-      if (circleStyle === 'green') {
-        targetDigit = analysis.mostFrequent;
-      } else if (circleStyle === 'blue') {
-        targetDigit = rankedDigits.length >= 2 ? rankedDigits[1].digit : analysis.mostFrequent;
-      } else if (circleStyle === 'orange') {
-        targetDigit = rankedDigits.length >= 10 ? rankedDigits[8].digit : analysis.leastFrequent;
-      } else {
-        targetDigit = analysis.leastFrequent;
-      }
-      const liveLastDigit = ticks.length > 0 ? ticks[ticks.length - 1].digit : 0;
-      if (liveLastDigit === targetDigit) {
-        matchedDigit = targetDigit;
-        matchReason = `Circle Mode (${circleStyle.toUpperCase()}): Digit ${targetDigit} touched`;
-      }
-    } else if (strategy === 'coldest') {
-      matchedDigit = analysis.leastFrequent;
-      matchReason = `Coldest Ticker: Digit ${matchedDigit} (${(
-        analysis.frequencies[matchedDigit] || 0
-      ).toFixed(1)}%)`;
-    } else if (strategy === 'even' || strategy === 'odd') {
-      const evens = [0, 2, 4, 6, 8];
-      const odds = [1, 3, 5, 7, 9];
-      let ok = false;
-      if (frequencyBotEvenOddMode === 'high_even') {
-        ok = evens.filter((d) => (analysis.frequencies[d] || 0) > frequencyBotBenchmarkPct).length > 3;
-      } else if (frequencyBotEvenOddMode === 'low_even') {
-        ok = evens.filter((d) => (analysis.frequencies[d] || 0) < frequencyBotBenchmarkPct).length >= 3;
-      } else if (frequencyBotEvenOddMode === 'high_odd') {
-        ok = odds.filter((d) => (analysis.frequencies[d] || 0) > frequencyBotBenchmarkPct).length > 3;
-      } else {
-        ok = odds.filter((d) => (analysis.frequencies[d] || 0) < frequencyBotBenchmarkPct).length >= 3;
-      }
-      if (ok) {
-        matchedDigit = 0;
-        matchReason = `Even/Odd (${frequencyBotEvenOddMode}) matched benchmark ${frequencyBotBenchmarkPct}%`;
-      }
-    } else {
-      const isSpecific = frequencyBotDigitFilterEnabled;
-      const compareMode = isRecovery
-        ? frequencyBotRecoveryCompareMode
-        : frequencyBotFilterCompareMode;
-      const targetPct = isRecovery ? frequencyBotRecoveryTargetPct : frequencyBotTargetPct;
-
-      if (isSpecific) {
-        const filterStr = isRecovery
-          ? frequencyBotRecoveryFilterDigits
-          : frequencyBotFilterDigits;
-        const targetDigits = filterStr
-          .split(',')
-          .map((s) => parseInt(s.trim(), 10))
-          .filter((v) => !isNaN(v) && v >= 0 && v <= 9);
-
-        for (let d = 0; d <= 9; d++) {
-          if (!targetDigits.includes(d)) continue;
-          const freq = analysis.frequencies[d] || 0;
-          const isMatch = compareMode === 'higher' ? freq >= targetPct : freq <= targetPct;
-          if (isMatch) {
-            matchedDigit = d;
-            matchReason = `Digit ${d} (${freq.toFixed(1)}%)`;
-            break;
-          }
-        }
-      } else if (isRecovery) {
-        for (let d = 0; d <= 9; d++) {
-          const freq = analysis.frequencies[d] || 0;
-          const isMatch = compareMode === 'higher' ? freq >= targetPct : freq <= targetPct;
-          if (isMatch) {
-            matchedDigit = d;
-            matchReason = `Recovery Digit ${d} (${freq.toFixed(1)}%)`;
-            break;
-          }
-        }
-      } else {
-        const targetPctStr = Number(frequencyBotTargetPct).toFixed(1);
-        for (let d = 0; d <= 9; d++) {
-          const freq = analysis.frequencies[d] || 0;
-          if (Number(freq).toFixed(1) === targetPctStr) {
-            matchedDigit = d;
-            matchReason = `Digit ${d} exact ${targetPctStr}%`;
-            break;
-          }
-        }
-      }
-    }
-
-    if (matchedDigit === null) return;
-
-    executingRef.current = true;
-    lastTradeAtRef.current = Date.now();
-
-    const apiContractType:
-      | 'digitdiff'
-      | 'digitover'
-      | 'digitunder'
-      | 'digiteven'
-      | 'digitodd' =
-      strategy === 'over'
-        ? 'digitover'
-        : strategy === 'under'
-        ? 'digitunder'
-        : strategy === 'even'
-        ? 'digiteven'
-        : strategy === 'odd'
-        ? 'digitodd'
-        : 'digitdiff';
-
-    let prediction = matchedDigit;
-    if (strategy === 'over' || strategy === 'under') {
-      if (frequencyBotCircleModeEnabled) {
-        prediction = isRecovery
-          ? frequencyBotRecoveryPredictionDigit
-          : frequencyBotPredictionDigit;
-      } else {
-        prediction = frequencyBotPredictionDigit;
-      }
-    }
-
-    const execStake = currentStakeRef.current;
-    const virtModeEnabled = Boolean(hasVirtualToken && frequencyBotVirtualMode);
-    const shouldTradeVirtual = virtModeEnabled && !inRealPhaseRef.current;
-    const durTicks = Math.max(1, Math.min(10, frequencyBotDuration));
-
-    const callFreqApi = async (virtualTrade: boolean, stakeAmount: number) => {
-      const res = await fetch('/api/autobot/trade', {
+    try {
+      const res = await fetch('/api/cloud-bots/frequency/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol,
-          contractType: apiContractType,
-          prediction,
-          stake: virtualTrade ? 0.35 : stakeAmount,
-          duration: durTicks,
-          isVirtual: virtualTrade,
-          strategyName: virtualTrade
-            ? `Frequency Bot Virtual (${strategy.toUpperCase()})`
-            : `Frequency Bot (${strategy.toUpperCase()})`,
+          analysisWindow,
+          stake: initialStake,
+          autoStakeEnabled: frequencyBotAutoStakeEnabled,
+          autoStakePct: frequencyBotAutoStakePct,
+          martingale: frequencyBotMartingale,
+          targetPct: frequencyBotTargetPct,
+          contractType: frequencyBotContractType,
+          tp: frequencyBotTp,
+          sl: frequencyBotSl,
+          maxRunsEnabled: frequencyBotMaxRunsEnabled,
+          maxRuns: frequencyBotMaxRuns,
+          duration: frequencyBotDuration,
+          evenOddMode: frequencyBotEvenOddMode,
+          benchmarkPct: frequencyBotBenchmarkPct,
+          digitFilterEnabled: frequencyBotDigitFilterEnabled,
+          filterDigits: frequencyBotFilterDigits,
+          filterCompareMode: frequencyBotFilterCompareMode,
+          smartRecoveryEnabled: frequencyBotSmartRecoveryEnabled,
+          circleModeEnabled: frequencyBotCircleModeEnabled,
+          circleType: frequencyBotCircleType,
+          recoveryCircleType: frequencyBotRecoveryCircleType,
+          predictionDigit: frequencyBotPredictionDigit,
+          recoveryPredictionDigit: frequencyBotRecoveryPredictionDigit,
+          recoveryContractType: frequencyBotRecoveryContractType,
+          recoveryTargetPct: frequencyBotRecoveryTargetPct,
+          recoveryCompareMode: frequencyBotRecoveryCompareMode,
+          recoveryFilterDigits: frequencyBotRecoveryFilterDigits,
+          virtualMode: Boolean(hasVirtualToken && frequencyBotVirtualMode),
+          virtualLossesTarget: frequencyBotVirtualLossesTarget,
+          marketSwitchMode,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Frequency Bot trade failed.');
-      return {
-        won: Boolean(data.won),
-        pnl: Number(data.profit || 0),
-      };
-    };
-
-    const runFreqExecution = async () => {
-      let realOutcome: { won: boolean; pnl: number } | null = null;
-
-      if (shouldTradeVirtual) {
-        onNotify(
-          'info',
-          `Frequency Match (${matchReason}): VIRTUAL ${apiContractType.toUpperCase()} @ $0.35`
-        );
-        const vRes = await callFreqApi(true, 0.35);
-        if (!tradingRef.current) return;
-
-        if (vRes.won) {
-          vLossStreakRef.current = 0;
-          setFrequencyBotVirtualWins((vw) => vw + 1);
-          onNotify('info', `Frequency Virtual WIN +$${vRes.pnl.toFixed(2)} on ${symbol}`);
-          return;
-        }
-
-        const nextVStreak = vLossStreakRef.current + 1;
-        vLossStreakRef.current = nextVStreak;
-        setFrequencyBotVirtualLosses((vl) => vl + 1);
-
-        if (nextVStreak < frequencyBotVirtualLossesTarget) {
-          onNotify(
-            'warn',
-            `Frequency Virtual LOSS (${nextVStreak}/${frequencyBotVirtualLossesTarget}) on ${symbol}`
-          );
-          return;
-        }
-
-        // Virtual loss count reached -> Switch to REAL immediately with ZERO lag
-        inRealPhaseRef.current = true;
-        onNotify(
-          'info',
-          `Virtual Loss Target (${nextVStreak}/${frequencyBotVirtualLossesTarget}) hit -> Executing REAL ${apiContractType.toUpperCase()} immediately @ $${execStake.toFixed(2)}!`
-        );
-        realOutcome = await callFreqApi(false, execStake);
+      if (!res.ok) {
+        onNotify('error', data?.error || 'Failed to start Frequency Bot.');
       } else {
-        onNotify(
-          'info',
-          `Frequency Match (${matchReason}): Executing ${apiContractType.toUpperCase()} @ $${execStake.toFixed(2)}`
-        );
-        realOutcome = await callFreqApi(false, execStake);
+        if (data?.cloudBots && onCloudBotsUpdate) onCloudBotsUpdate(data.cloudBots);
+        onNotify('success', `Exact Frequency Match Bot started on ${symbol} (Cloud 24/7).`);
       }
-
-      if (!realOutcome || !tradingRef.current) return;
-
-      const { pnl, won } = realOutcome;
-      const nextProfit = sessionProfitRef.current + pnl;
-      sessionProfitRef.current = nextProfit;
-      setFrequencyBotSessionProfit(nextProfit);
-
-      if (won) {
-        winsRef.current += 1;
-        consecutiveLossesRef.current = 0;
-        setFrequencyBotWins(winsRef.current);
-        if (virtModeEnabled) {
-          vLossStreakRef.current = 0;
-          inRealPhaseRef.current = false;
-        }
-
-        let baseStake = frequencyBotStake;
-        if (frequencyBotAutoStakeEnabled) {
-          const bal = accountBalance > 0 ? accountBalance : 100;
-          baseStake = Math.max(
-            0.35,
-            parseFloat((bal * (frequencyBotAutoStakePct / 100)).toFixed(2))
-          );
-          setFrequencyBotStake(baseStake);
-        }
-        currentStakeRef.current = baseStake;
-        onNotify('success', `Frequency Bot WIN +$${pnl.toFixed(2)} on ${symbol}`);
-
-        if (marketSwitchMode === 'always' && tradingRef.current) {
-          const nextSym = await onTriggerBackgroundRescan(symbol);
-          if (nextSym && tradingRef.current) onChangeSymbol(nextSym);
-        }
-      } else {
-        consecutiveLossesRef.current += 1;
-        setFrequencyBotLosses((prev) => prev + 1);
-        const nextStake = Number(
-          (execStake * Math.max(1, frequencyBotMartingale)).toFixed(2)
-        );
-        currentStakeRef.current = nextStake;
-        onNotify(
-          'warn',
-          `Frequency Bot LOSS -$${Math.abs(pnl).toFixed(2)} -> Next $${nextStake.toFixed(2)}`
-        );
-
-        if ((marketSwitchMode === 'loss' || marketSwitchMode === 'always') && tradingRef.current) {
-          const nextSym = await onTriggerBackgroundRescan(symbol);
-          if (nextSym && tradingRef.current) onChangeSymbol(nextSym);
-        }
-      }
-
-      if (frequencyBotMaxRunsEnabled) {
-        if (winsRef.current >= frequencyBotMaxRuns && consecutiveLossesRef.current === 0) {
-          onNotify(
-            'success',
-            `Target winning runs reached (${winsRef.current}/${frequencyBotMaxRuns}). Bot stopped.`
-          );
-          tradingRef.current = false;
-          setIsFrequencyBotTrading(false);
-          return;
-        }
-      } else if (nextProfit >= frequencyBotTp) {
-        onNotify('success', `Take Profit reached: +$${nextProfit.toFixed(2)}. Bot stopped.`);
-        tradingRef.current = false;
-        setIsFrequencyBotTrading(false);
-        return;
-      }
-
-      if (nextProfit <= -frequencyBotSl) {
-        onNotify('error', `Stop Loss reached: -$${Math.abs(nextProfit).toFixed(2)}. Bot stopped.`);
-        tradingRef.current = false;
-        setIsFrequencyBotTrading(false);
-      }
-    };
-
-    runFreqExecution()
-      .catch((err) => {
-        onNotify('error', err?.message || 'Frequency Bot error');
-        tradingRef.current = false;
-        setIsFrequencyBotTrading(false);
-      })
-      .finally(() => {
-        executingRef.current = false;
-      });
-  }, [
-    ticks,
-    analysis,
-    isFrequencyBotTrading,
-    symbol,
-    rankedDigits,
-    frequencyBotStake,
-    frequencyBotAutoStakeEnabled,
-    frequencyBotAutoStakePct,
-    accountBalance,
-    frequencyBotMartingale,
-    frequencyBotTargetPct,
-    frequencyBotContractType,
-    frequencyBotDuration,
-    frequencyBotEvenOddMode,
-    frequencyBotBenchmarkPct,
-    frequencyBotDigitFilterEnabled,
-    frequencyBotFilterDigits,
-    frequencyBotFilterCompareMode,
-    frequencyBotSmartRecoveryEnabled,
-    frequencyBotRecoveryContractType,
-    frequencyBotRecoveryTargetPct,
-    frequencyBotRecoveryCompareMode,
-    frequencyBotRecoveryFilterDigits,
-    frequencyBotCircleModeEnabled,
-    frequencyBotCircleType,
-    frequencyBotRecoveryCircleType,
-    frequencyBotPredictionDigit,
-    frequencyBotRecoveryPredictionDigit,
-    frequencyBotTp,
-    frequencyBotSl,
-    frequencyBotMaxRunsEnabled,
-    frequencyBotMaxRuns,
-    marketSwitchMode,
-    hasVirtualToken,
-    frequencyBotVirtualMode,
-    frequencyBotVirtualLossesTarget,
-  ]);
+    } catch (err: any) {
+      onNotify('error', err?.message || 'Failed to start Frequency Bot.');
+    }
+  };
 
   const digitChartData = useMemo(() => {
     if (!analysis) return [];
@@ -958,9 +688,9 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
                   <div
                     className={cn(
                       'flex items-center gap-3 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-wider border',
-                      frequencyBotSessionProfit > 0
+                      effectiveSessionProfit > 0
                         ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                        : frequencyBotSessionProfit < 0
+                        : effectiveSessionProfit < 0
                         ? 'bg-rose-500/10 border-rose-500/20 text-rose-400'
                         : 'bg-slate-500/10 border-slate-500/20 text-slate-400'
                     )}
@@ -968,7 +698,7 @@ export const ClassicFrequencyView: React.FC<ClassicFrequencyViewProps> = ({
                     {isFrequencyBotTrading && (
                       <div className="w-2 h-2 rounded-full bg-current animate-ping" />
                     )}
-                    <span>Profit: ${frequencyBotSessionProfit.toFixed(2)}</span>
+                    <span>Profit: ${effectiveSessionProfit.toFixed(2)}</span>
                   </div>
 
                   <div className="flex items-center gap-1.5 px-3 py-1.5 bg-[#111217] border border-[#2d2f36] rounded-xl text-[11px] font-bold font-mono">

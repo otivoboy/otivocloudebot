@@ -2,21 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Play, ShieldCheck, Square, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
 import { cn } from '../../lib/utils';
-import {
-  AccuracyEvaluator,
-  HackerMathSummary,
-  IngestionBuffer,
-  MathReconstructionSolver,
-  ShadowGenerator,
-  ShadowPrediction,
-} from '../../lib/hackerMath';
-import { getSymbolDecimals } from './types';
+import type { AiHackerCloudState, CloudBotsSnapshot } from '../../types/cloudBots';
 
 interface AiMarketHackerModalProps {
   open: boolean;
   onClose: () => void;
   connected: boolean;
   hasVirtualToken: boolean;
+  cloudState?: AiHackerCloudState;
+  onCloudBotsUpdate?: (snap: CloudBotsSnapshot) => void;
   onScanningChange: (scanning: boolean) => void;
   onNotifyError: (msg: string) => void;
 }
@@ -39,10 +33,11 @@ export const AiMarketHackerModal: React.FC<AiMarketHackerModalProps> = ({
   onClose,
   connected,
   hasVirtualToken,
+  cloudState,
+  onCloudBotsUpdate,
   onScanningChange,
   onNotifyError,
 }) => {
-  const [hackerScanning, setHackerScanning] = useState(false);
   const [hackerStake, setHackerStake] = useState(() =>
     parseFloat(localStorage.getItem('hacker_stake') || '0.50')
   );
@@ -80,82 +75,47 @@ export const AiMarketHackerModal: React.FC<AiMarketHackerModalProps> = ({
       (localStorage.getItem('hacker_recovery_contract') as 'DIGITOVER' | 'DIGITUNDER') ||
       'DIGITOVER'
   );
-  const [hackerVirtualStats, setHackerVirtualStats] = useState({ wins: 0, losses: 0 });
-  const [hackerTradesCount, setHackerTradesCount] = useState(0);
-  const [hackerWinsCount, setHackerWinsCount] = useState(0);
-  const [hackerLossesCount, setHackerLossesCount] = useState(0);
-  const [hackerSessionProfit, setHackerSessionProfit] = useState(0);
-  const [hackerLogs, setHackerLogs] = useState<string[]>([]);
-  const [hackerMarketDigits, setHackerMarketDigits] = useState<Record<string, number[]>>({});
-  const [hackerMathSummaries, setHackerMathSummaries] = useState<
-    Record<string, HackerMathSummary>
-  >({});
   const [hackerSelectedMathSymbol, setHackerSelectedMathSymbol] = useState<string>('1HZ10V');
 
-  const hackerMathEnginesRef = useRef<
-    Record<
-      string,
-      {
-        ingestion: IngestionBuffer;
-        solver: MathReconstructionSolver;
-        generator: ShadowGenerator;
-        evaluator: AccuracyEvaluator;
-        lastPred: ShadowPrediction | null;
-      }
-    >
-  >({});
-  const hackerSocketRef = useRef<WebSocket | null>(null);
-  const hackerDigitsRef = useRef<Record<string, number[]>>({});
-  const hackerIsExecutingRef = useRef(false);
-  const hackerTradesCountRef = useRef(0);
-  const hackerWinsCountRef = useRef(0);
-  const hackerMaxTradesRef = useRef(5);
-  const hackerStakeRef = useRef(0.5);
-  const hackerCurrentStakeRef = useRef(0.5);
-  const hackerMartingaleMultRef = useRef(2.1);
-  const hackerMartingaleAfterLossesRef = useRef(1);
-  const hackerDurationTicksRef = useRef(1);
-  const hackerConsecutiveLossesRef = useRef(0);
-  const hackerScanningRef = useRef(false);
-  const hackerVirtualModeRef = useRef(false);
-  const hackerVirtualLossesRef = useRef(1);
-  const hackerAutoRestartWinRef = useRef(false);
-  const hackerSameMarketRecoveryRef = useRef(false);
-  const hackerContinuousSameMarketRef = useRef(false);
-  const hackerLockedMarketRef = useRef<string | null>(null);
-  const hasTriggeredRealTradeForLockedMarketRef = useRef(false);
-  const hackerRecoveryContractRef = useRef<'DIGITOVER' | 'DIGITUNDER'>('DIGITOVER');
-  const hackerConsecutiveVirtualLossesRef = useRef(0);
+  const hackerScanning = Boolean(cloudState?.running);
+  const hackerVirtualStats = cloudState?.virtualStats ?? { wins: 0, losses: 0 };
+  const hackerTradesCount = cloudState?.tradesCount ?? 0;
+  const hackerWinsCount = cloudState?.winsCount ?? 0;
+  const hackerLossesCount = cloudState?.lossesCount ?? 0;
+  const hackerSessionProfit = cloudState?.sessionProfit ?? 0;
+  const hackerLogs = cloudState?.logs ?? [];
+  const hackerMarketDigits = cloudState?.marketDigits ?? {};
+  const hackerMathSummaries = cloudState?.mathSummaries ?? {};
 
-  const addHackerLog = (msg: string) => {
-    setHackerLogs((prev) => [...prev, msg].slice(-100));
-  };
+  const lastErrorMsgRef = useRef<string | null>(cloudState?.errorMsg ?? null);
 
   useEffect(() => {
     onScanningChange(hackerScanning);
   }, [hackerScanning, onScanningChange]);
+
+  useEffect(() => {
+    if (cloudState?.errorMsg && cloudState.errorMsg !== lastErrorMsgRef.current) {
+      lastErrorMsgRef.current = cloudState.errorMsg;
+      onNotifyError(cloudState.errorMsg);
+    } else if (!cloudState?.errorMsg) {
+      lastErrorMsgRef.current = null;
+    }
+  }, [cloudState?.errorMsg, onNotifyError]);
 
   // Strict Virtual Token Gating
   useEffect(() => {
     if (!hasVirtualToken) {
       if (hackerVirtualMode) setHackerVirtualMode(false);
       if (hackerAutoRestartWin) setHackerAutoRestartWin(false);
-      hackerVirtualModeRef.current = false;
-      hackerAutoRestartWinRef.current = false;
     }
   }, [hasVirtualToken, hackerVirtualMode, hackerAutoRestartWin]);
 
   useEffect(() => {
     localStorage.setItem('hacker_stake', hackerStake.toString());
-    hackerStakeRef.current = hackerStake;
-    if (!hackerScanningRef.current) {
-      hackerCurrentStakeRef.current = hackerStake;
-    }
   }, [hackerStake]);
 
   useEffect(() => {
     localStorage.setItem('hacker_martingale_mult', hackerMartingaleMultiplier.toString());
-    hackerMartingaleMultRef.current = hackerMartingaleMultiplier;
   }, [hackerMartingaleMultiplier]);
 
   useEffect(() => {
@@ -163,680 +123,97 @@ export const AiMarketHackerModal: React.FC<AiMarketHackerModalProps> = ({
       'hacker_martingale_after_losses',
       hackerMartingaleAfterLosses.toString()
     );
-    hackerMartingaleAfterLossesRef.current = hackerMartingaleAfterLosses;
   }, [hackerMartingaleAfterLosses]);
 
   useEffect(() => {
     localStorage.setItem('hacker_duration_ticks', hackerDurationTicks.toString());
-    hackerDurationTicksRef.current = hackerDurationTicks;
   }, [hackerDurationTicks]);
 
   useEffect(() => {
     localStorage.setItem('hacker_max_trades', hackerMaxTrades.toString());
-    hackerMaxTradesRef.current = hackerMaxTrades;
   }, [hackerMaxTrades]);
 
   useEffect(() => {
     localStorage.setItem('hacker_virtual_mode', hackerVirtualMode.toString());
-    hackerVirtualModeRef.current = Boolean(hasVirtualToken && hackerVirtualMode);
-  }, [hackerVirtualMode, hasVirtualToken]);
+  }, [hackerVirtualMode]);
 
   useEffect(() => {
     localStorage.setItem('hacker_virtual_losses', hackerVirtualLosses.toString());
-    hackerVirtualLossesRef.current = hackerVirtualLosses;
   }, [hackerVirtualLosses]);
 
   useEffect(() => {
     localStorage.setItem('hacker_auto_restart_win', hackerAutoRestartWin.toString());
-    hackerAutoRestartWinRef.current = Boolean(hasVirtualToken && hackerAutoRestartWin);
-  }, [hackerAutoRestartWin, hasVirtualToken]);
+  }, [hackerAutoRestartWin]);
 
   useEffect(() => {
     localStorage.setItem('hacker_same_market_recovery', hackerSameMarketRecovery.toString());
-    hackerSameMarketRecoveryRef.current = hackerSameMarketRecovery;
   }, [hackerSameMarketRecovery]);
 
   useEffect(() => {
     localStorage.setItem('hacker_continuous_same_market', hackerContinuousSameMarket.toString());
-    hackerContinuousSameMarketRef.current = hackerContinuousSameMarket;
   }, [hackerContinuousSameMarket]);
 
   useEffect(() => {
     localStorage.setItem('hacker_recovery_contract', hackerRecoveryContract);
-    hackerRecoveryContractRef.current = hackerRecoveryContract;
   }, [hackerRecoveryContract]);
 
   const toggleHackerAutoRestartWin = (enable: boolean) => {
     if (!hasVirtualToken) return;
     setHackerAutoRestartWin(enable);
-    hackerAutoRestartWinRef.current = enable;
     if (enable) {
       setHackerVirtualMode(true);
-      hackerVirtualModeRef.current = true;
       setHackerVirtualLosses(1);
-      hackerVirtualLossesRef.current = 1;
     }
   };
 
-  const stopHackerScanner = (reasonArg?: string | React.MouseEvent) => {
-    const reason = typeof reasonArg === 'string' ? reasonArg : 'stopped by user';
-    setHackerScanning(false);
-    hackerScanningRef.current = false;
-    hackerIsExecutingRef.current = false;
-    hackerConsecutiveVirtualLossesRef.current = 0;
-    hackerLockedMarketRef.current = null;
-    hasTriggeredRealTradeForLockedMarketRef.current = false;
-    if (reason === 'stopped by user') {
-      hackerConsecutiveLossesRef.current = 0;
-      hackerCurrentStakeRef.current = hackerStakeRef.current;
-    }
-    if (hackerSocketRef.current) {
-      hackerSocketRef.current.close();
-      hackerSocketRef.current = null;
-    }
-    addHackerLog(`[SYS] Scanner ${reason}.`);
-  };
-
-  const executeTradeViaApi = async (params: {
-    sym: string;
-    contractType: 'DIGITUNDER' | 'DIGITOVER';
-    barrier: number;
-    stake: number;
-    isVirtual: boolean;
-  }): Promise<{ won: boolean; profit: number }> => {
-    const durationTicks = Math.max(1, Math.min(10, hackerDurationTicksRef.current || 1));
-    // Hardcoded $0.35 stake when executing on Virtual Mode API account
-    const effectiveStake = params.isVirtual ? 0.35 : params.stake;
-    const res = await fetch('/api/autobot/trade', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        symbol: params.sym,
-        contractType: params.contractType === 'DIGITUNDER' ? 'digitunder' : 'digitover',
-        prediction: params.barrier,
-        stake: effectiveStake,
-        duration: durationTicks,
-        isVirtual: params.isVirtual,
-        strategyName: params.isVirtual
-          ? `AI Hacker Virtual (${params.contractType} ${params.barrier})`
-          : `AI Market Hacker (${params.contractType} ${params.barrier})`,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Trade execution failed.');
-    }
-    return {
-      won: Boolean(data.won),
-      profit: Number(data.profit || 0),
-    };
-  };
-
-  const handleRealTradeSequence = async (
-    sym: string,
-    contractType: 'DIGITUNDER' | 'DIGITOVER',
-    barrier: number,
-    stake: number
-  ) => {
+  const stopHackerScanner = async () => {
     try {
-      const outcome = await executeTradeViaApi({
-        sym,
-        contractType,
-        barrier,
-        stake,
-        isVirtual: false,
-      });
-
-      if (!hackerScanningRef.current) return;
-
-      const profitVal = outcome.profit;
-      setHackerSessionProfit((prev) => prev + profitVal);
-      setHackerTradesCount((prev) => {
-        const nextCount = prev + 1;
-        hackerTradesCountRef.current = nextCount;
-        return nextCount;
-      });
-
-      if (outcome.won) {
-        hackerConsecutiveLossesRef.current = 0;
-        hackerCurrentStakeRef.current = hackerStakeRef.current;
-
-        const nextWins = hackerWinsCountRef.current + 1;
-        hackerWinsCountRef.current = nextWins;
-        setHackerWinsCount(nextWins);
-
-        addHackerLog(
-          `[RESULT] ${sym} ${contractType} ${barrier} -> WIN +$${profitVal.toFixed(
-            2
-          )} (Stake reset to $${hackerStakeRef.current.toFixed(2)})`
-        );
-
-        const targetWins = hackerMaxTradesRef.current;
-        if (targetWins > 0 && nextWins >= targetWins) {
-          addHackerLog(
-            `[TARGET REACHED] Target of ${targetWins} winning run(s) achieved! (${nextWins}/${targetWins}) Auto-stopping scanner.`
-          );
-          stopHackerScanner('target reached');
-          return;
-        }
-      } else {
-        const newLosses = hackerConsecutiveLossesRef.current + 1;
-        hackerConsecutiveLossesRef.current = newLosses;
-        setHackerLossesCount((prev) => prev + 1);
-
-        const afterLossesThreshold = hackerMartingaleAfterLossesRef.current || 1;
-        const multiplier = hackerMartingaleMultRef.current;
-
-        if (newLosses >= afterLossesThreshold && multiplier > 1) {
-          const effectiveLossSteps = newLosses - afterLossesThreshold + 1;
-          const nextStake = parseFloat(
-            (hackerStakeRef.current * Math.pow(multiplier, effectiveLossSteps)).toFixed(2)
-          );
-          hackerCurrentStakeRef.current = nextStake;
-          addHackerLog(
-            `[RESULT] ${sym} ${contractType} ${barrier} -> LOSS -$${Math.abs(profitVal).toFixed(
-              2
-            )} | Loss #${newLosses}: Martingale (${multiplier}x, Level ${effectiveLossSteps}) -> Next Stake: $${nextStake.toFixed(
-              2
-            )}`
-          );
-        } else {
-          hackerCurrentStakeRef.current = hackerStakeRef.current;
-          addHackerLog(
-            `[RESULT] ${sym} ${contractType} ${barrier} -> LOSS -$${Math.abs(profitVal).toFixed(
-              2
-            )} | Loss #${newLosses}/${afterLossesThreshold} -> Next Stake: $${hackerCurrentStakeRef.current.toFixed(
-              2
-            )}`
-          );
-        }
-
-        if (
-          (hackerContinuousSameMarketRef.current || hackerSameMarketRecoveryRef.current) &&
-          hackerScanningRef.current
-        ) {
-          const recContract: 'DIGITOVER' | 'DIGITUNDER' = hackerSameMarketRecoveryRef.current
-            ? hackerRecoveryContractRef.current === 'DIGITUNDER'
-              ? 'DIGITUNDER'
-              : 'DIGITOVER'
-            : contractType;
-          const recBarrier = recContract === 'DIGITUNDER' ? 8 : 1;
-          hasTriggeredRealTradeForLockedMarketRef.current = true;
-          if (hackerContinuousSameMarketRef.current) {
-            hackerLockedMarketRef.current = sym;
-          }
-          addHackerLog(
-            `[FAST MARTINGALE RECOVERY] Immediate recovery triggered on ${sym} -> Purchasing REAL ${recContract} ${recBarrier} @ $${hackerCurrentStakeRef.current.toFixed(
-              2
-            )}...`
-          );
-          if (hackerScanningRef.current) {
-            void handleRealTradeSequence(
-              sym,
-              recContract,
-              recBarrier,
-              hackerCurrentStakeRef.current
-            );
-          }
-          return;
-        }
-      }
-
-      const postTradeDelay = hackerContinuousSameMarketRef.current ? 0 : 800;
-      const finishPostTrade = () => {
-        if (hackerScanningRef.current) {
-          hackerIsExecutingRef.current = false;
-          if (hackerContinuousSameMarketRef.current && hackerLockedMarketRef.current) {
-            addHackerLog(
-              `[CONTINUOUS SAME MARKET] Trade on ${hackerLockedMarketRef.current} completed. Scanner remaining locked on ${hackerLockedMarketRef.current}...`
-            );
-          } else {
-            hackerLockedMarketRef.current = null;
-            addHackerLog('[SCAN] Resuming multi-market scanning across all 10 markets...');
-          }
-        }
-      };
-      if (postTradeDelay === 0) {
-        finishPostTrade();
-      } else {
-        setTimeout(finishPostTrade, postTradeDelay);
+      const res = await fetch('/api/cloud-bots/ai-hacker/stop', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        onNotifyError(data?.error || 'Failed to stop AI Market Hacker.');
+      } else if (data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
       }
     } catch (err: any) {
-      addHackerLog(`[ERROR] Trade execution failed: ${err?.message || err}`);
-      hackerIsExecutingRef.current = false;
+      onNotifyError(err?.message || 'Failed to stop AI Market Hacker.');
     }
   };
 
-  const handleVirtualThenRealSequence = async (params: {
-    sym: string;
-    virtualContractType: 'DIGITUNDER' | 'DIGITOVER';
-    virtualBarrier: number;
-    realContractType: 'DIGITUNDER' | 'DIGITOVER';
-    realBarrier: number;
-    targetVirtualLosses: number;
-  }) => {
-    try {
-      while (hackerScanningRef.current) {
-        const outcome = await executeTradeViaApi({
-          sym: params.sym,
-          contractType: params.virtualContractType,
-          barrier: params.virtualBarrier,
-          stake: 0.35,
-          isVirtual: true,
-        });
-
-        if (!hackerScanningRef.current) return;
-
-        if (outcome.won) {
-          hackerConsecutiveVirtualLossesRef.current = 0;
-          setHackerVirtualStats((prev) => ({ ...prev, wins: prev.wins + 1 }));
-          addHackerLog(
-            `[VIRTUAL WIN @ $0.35] ${params.sym} (${params.virtualContractType} ${params.virtualBarrier}) -> VIRTUAL WIN +$${outcome.profit.toFixed(
-              2
-            )} | Consecutive Virtual Losses reset to 0/${params.targetVirtualLosses}`
-          );
-
-          if (hackerAutoRestartWinRef.current) {
-            addHackerLog(
-              '[AUTO-RESTART ON VIRTUAL WIN] Opposite virtual trade was a WIN! Restarting scanner for a virtual LOSS...'
-            );
-            hackerIsExecutingRef.current = false;
-            stopHackerScanner('auto-restart on virtual win');
-            setTimeout(() => {
-              startHackerScanner();
-            }, 500);
-            return;
-          }
-        } else {
-          const nextLosses = hackerConsecutiveVirtualLossesRef.current + 1;
-          hackerConsecutiveVirtualLossesRef.current = nextLosses;
-          setHackerVirtualStats((prev) => ({ ...prev, losses: prev.losses + 1 }));
-          addHackerLog(
-            `[VIRTUAL LOSS] ${params.sym} (${params.virtualContractType} ${params.virtualBarrier}) -> VIRTUAL LOSS #${nextLosses}/${params.targetVirtualLosses}`
-          );
-
-          if (nextLosses >= params.targetVirtualLosses) {
-            addHackerLog(
-              `[VIRTUAL THRESHOLD MET] Reached ${params.targetVirtualLosses} virtual loss(es)! Placing REAL ${params.realContractType} ${params.realBarrier} on ${params.sym} @ $${hackerCurrentStakeRef.current.toFixed(
-                2
-              )}...`
-            );
-            hackerConsecutiveVirtualLossesRef.current = 0;
-            hasTriggeredRealTradeForLockedMarketRef.current = true;
-            await handleRealTradeSequence(
-              params.sym,
-              params.realContractType,
-              params.realBarrier,
-              hackerCurrentStakeRef.current
-            );
-            return;
-          }
-        }
-      }
-    } catch (err: any) {
-      addHackerLog(`[ERROR] Virtual execution failed: ${err?.message || err}`);
-      hackerIsExecutingRef.current = false;
-    }
-  };
-
-  const startHackerScanner = () => {
+  const startHackerScanner = async () => {
     if (!connected) {
       onNotifyError('Connect your Deriv Real/Demo API token via Deriv API Connection first.');
       return;
     }
 
-    setHackerScanning(true);
-    hackerScanningRef.current = true;
-    setHackerTradesCount(0);
-    setHackerWinsCount(0);
-    setHackerLossesCount(0);
-    setHackerSessionProfit(0);
-    setHackerVirtualStats({ wins: 0, losses: 0 });
-    hackerTradesCountRef.current = 0;
-    hackerWinsCountRef.current = 0;
-    hackerMaxTradesRef.current = hackerMaxTrades;
-    hackerStakeRef.current = hackerStake;
-    if (hackerConsecutiveLossesRef.current === 0) {
-      hackerCurrentStakeRef.current = hackerStake;
-    }
-    hackerMartingaleMultRef.current = hackerMartingaleMultiplier;
-    hackerMartingaleAfterLossesRef.current = hackerMartingaleAfterLosses;
-    hackerDurationTicksRef.current = hackerDurationTicks;
-    hackerVirtualModeRef.current = Boolean(hasVirtualToken && hackerVirtualMode);
-    hackerVirtualLossesRef.current = hackerVirtualLosses;
-    hackerAutoRestartWinRef.current = Boolean(hasVirtualToken && hackerAutoRestartWin);
-    hackerSameMarketRecoveryRef.current = hackerSameMarketRecovery;
-    hackerContinuousSameMarketRef.current = hackerContinuousSameMarket;
-    hackerRecoveryContractRef.current = hackerRecoveryContract;
-    hackerIsExecutingRef.current = false;
-    hackerConsecutiveVirtualLossesRef.current = 0;
-    hackerLockedMarketRef.current = null;
-    hasTriggeredRealTradeForLockedMarketRef.current = false;
-
-    addHackerLog('[SYS] Authenticating at market matrix...');
-    addHackerLog('[SYS] Synthetic stream linked (10 Volatility Markets)');
-    addHackerLog('[SCAN] Initializing 100-tick historical buffer...');
-    addHackerLog(
-      `[SYS] Stake: $${hackerStake.toFixed(
-        2
-      )} | Duration: ${hackerDurationTicks} tick(s) | Target Wins (Runs): ${hackerMaxTrades} | Martingale: ${hackerMartingaleMultiplier}x after ${hackerMartingaleAfterLosses} loss(es)`
-    );
-    if (hasVirtualToken && hackerVirtualMode) {
-      addHackerLog(
-        `[VIRTUAL MANAGER] Virtual Switch: ENABLED (Opposite Direction - Target Virtual Losses: ${hackerVirtualLosses})`
-      );
-      if (hackerAutoRestartWin) {
-        addHackerLog('[AUTO-RESTART MANAGER] Auto-Restart on Virtual Win: ACTIVE');
-      }
-    }
-    if (hackerSameMarketRecovery) {
-      addHackerLog(
-        `[SAME MARKET RECOVERY] Active: Immediate recovery on loss market using ${
-          hackerRecoveryContract === 'DIGITOVER' ? 'Over 1' : 'Under 8'
-        }`
-      );
-    }
-    if (hackerContinuousSameMarket) {
-      addHackerLog(
-        '[CONTINUOUS SAME MARKET] Active: Scanner locks onto signal market for continuous same-market trades.'
-      );
-    }
-    addHackerLog('[OK] AI Market Hacker High-Precision 4-Layer Math Filter armed');
-
-    if (hackerSocketRef.current) {
-      hackerSocketRef.current.close();
-    }
-
-    const ws = new WebSocket(
-      'wss://api.derivws.com/trading/v1/options/ws/public?app_id=34SRQBBtI5nwEFQqmc3se'
-    );
-    hackerSocketRef.current = ws;
-
-    ws.onopen = () => {
-      VOLATILITY_10_MARKETS.forEach((m) => {
-        hackerDigitsRef.current[m] = [];
-        ws.send(
-          JSON.stringify({
-            ticks_history: m,
-            count: 100,
-            end: 'latest',
-            style: 'ticks',
-          })
-        );
-        ws.send(JSON.stringify({ ticks: m, subscribe: 1 }));
+    try {
+      const res = await fetch('/api/cloud-bots/ai-hacker/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stake: hackerStake,
+          martingaleMultiplier: hackerMartingaleMultiplier,
+          martingaleAfterLosses: hackerMartingaleAfterLosses,
+          durationTicks: hackerDurationTicks,
+          maxTrades: hackerMaxTrades,
+          virtualMode: Boolean(hasVirtualToken && hackerVirtualMode),
+          virtualLosses: hackerVirtualLosses,
+          autoRestartWin: Boolean(hasVirtualToken && hackerAutoRestartWin),
+          sameMarketRecovery: hackerSameMarketRecovery,
+          continuousSameMarket: hackerContinuousSameMarket,
+          recoveryContract: hackerRecoveryContract,
+        }),
       });
-    };
-
-    ws.onmessage = (event) => {
-      if (!hackerScanningRef.current) return;
-      const data = JSON.parse(event.data);
-
-      if (data.msg_type === 'history' && data.echo_req?.ticks_history) {
-        const sym = data.echo_req.ticks_history;
-        const prices = data.history?.prices || [];
-        const precision = getSymbolDecimals(sym);
-        const digits = prices.map((p: number) => {
-          const sPrice = p.toFixed(precision);
-          return parseInt(sPrice[sPrice.length - 1], 10);
-        });
-        hackerDigitsRef.current[sym] = digits.slice(-100);
-        setHackerMarketDigits((prev) => ({ ...prev, [sym]: hackerDigitsRef.current[sym] }));
-
-        if (!hackerMathEnginesRef.current[sym]) {
-          const ingestion = new IngestionBuffer(1000);
-          const solver = new MathReconstructionSolver();
-          const generator = new ShadowGenerator(solver);
-          const evaluator = new AccuracyEvaluator();
-          hackerMathEnginesRef.current[sym] = {
-            ingestion,
-            solver,
-            generator,
-            evaluator,
-            lastPred: null,
-          };
-        }
-        const engine = hackerMathEnginesRef.current[sym];
-        digits.forEach((d: number) => engine.ingestion.push(d));
-        engine.solver.fit(engine.ingestion.getAll());
-        if (digits.length > 0) {
-          engine.lastPred = engine.generator.predictNext(digits[digits.length - 1]);
-        }
-        const report = engine.evaluator.getReport();
-        if (engine.lastPred) {
-          setHackerMathSummaries((prev) => ({
-            ...prev,
-            [sym]: {
-              symbol: sym,
-              isDeterministic: engine.solver.isDeterministic,
-              lcgParams: engine.solver.lcgParams,
-              topPrediction: engine.lastPred!.topPrediction,
-              confidence: engine.lastPred!.confidence,
-              top3Predictions: engine.lastPred!.top3Predictions,
-              probabilities: engine.lastPred!.probabilities,
-              totalEvaluated: report.totalEvaluated,
-              exactAccuracyPct: report.exactMatchAccuracyPct,
-              top3AccuracyPct: report.top3MatchAccuracyPct,
-              mae: report.meanAbsoluteError,
-            },
-          }));
-        }
+      const data = await res.json();
+      if (!res.ok) {
+        onNotifyError(data?.error || 'Failed to start AI Market Hacker.');
+      } else if (data?.cloudBots && onCloudBotsUpdate) {
+        onCloudBotsUpdate(data.cloudBots);
       }
-
-      if (data.msg_type === 'tick' && data.tick) {
-        const sym = data.tick.symbol;
-        if (!VOLATILITY_10_MARKETS.includes(sym)) return;
-        if (
-          hackerContinuousSameMarketRef.current &&
-          hackerLockedMarketRef.current &&
-          sym !== hackerLockedMarketRef.current
-        ) {
-          return;
-        }
-        const quote = Number(data.tick.quote);
-        const precision = getSymbolDecimals(sym);
-        const digit = parseInt(quote.toFixed(precision).slice(-1), 10);
-
-        if (!hackerDigitsRef.current[sym]) hackerDigitsRef.current[sym] = [];
-        const history = [...hackerDigitsRef.current[sym], digit].slice(-100);
-        hackerDigitsRef.current[sym] = history;
-        setHackerMarketDigits((prev) => ({ ...prev, [sym]: history }));
-
-        if (!hackerMathEnginesRef.current[sym]) {
-          const ingestion = new IngestionBuffer(1000);
-          const solver = new MathReconstructionSolver();
-          const generator = new ShadowGenerator(solver);
-          const evaluator = new AccuracyEvaluator();
-          hackerMathEnginesRef.current[sym] = {
-            ingestion,
-            solver,
-            generator,
-            evaluator,
-            lastPred: null,
-          };
-        }
-        const mathEngine = hackerMathEnginesRef.current[sym];
-        if (mathEngine.lastPred) {
-          mathEngine.evaluator.evaluate(digit, mathEngine.lastPred);
-        }
-        mathEngine.ingestion.push(digit);
-        mathEngine.solver.fit(mathEngine.ingestion.getAll());
-        const nextPred = mathEngine.generator.predictNext(digit);
-        mathEngine.lastPred = nextPred;
-
-        const report = mathEngine.evaluator.getReport();
-        setHackerMathSummaries((prev) => ({
-          ...prev,
-          [sym]: {
-            symbol: sym,
-            isDeterministic: mathEngine.solver.isDeterministic,
-            lcgParams: mathEngine.solver.lcgParams,
-            topPrediction: nextPred.topPrediction,
-            confidence: nextPred.confidence,
-            top3Predictions: nextPred.top3Predictions,
-            probabilities: nextPred.probabilities,
-            totalEvaluated: report.totalEvaluated,
-            exactAccuracyPct: report.exactMatchAccuracyPct,
-            top3AccuracyPct: report.top3MatchAccuracyPct,
-            mae: report.meanAbsoluteError,
-          },
-        }));
-
-        const last4 = history.slice(-4);
-        const last3 = history.slice(-3);
-
-        if (history.length >= 20 && !hackerIsExecutingRef.current) {
-          const probs = nextPred ? nextPred.probabilities : Array(10).fill(0.1);
-          const pWinOver1 = probs.slice(2, 10).reduce((sum, p) => sum + p, 0);
-          const pWinUnder8 = probs.slice(0, 8).reduce((sum, p) => sum + p, 0);
-
-          const layer1Over1Pass = pWinOver1 >= 0.8;
-          const layer1Under8Pass = pWinUnder8 >= 0.8;
-
-          const layer2Over1Pass =
-            last3.every((d) => d >= 2) && (digit === 2 || digit === 3 || digit === 4);
-          const layer2Under8Pass =
-            last3.every((d) => d <= 7) && (digit === 7 || digit === 6 || digit === 5);
-
-          const trapCountOver1 = last4.filter((d) => d === 0 || d === 1).length;
-          const trapCountUnder8 = last4.filter((d) => d === 8 || d === 9).length;
-
-          const layer3Over1Pass = trapCountOver1 === 0;
-          const layer3Under8Pass = trapCountUnder8 === 0;
-
-          const layer4Over1Pass =
-            !nextPred || (nextPred.topPrediction !== 0 && nextPred.topPrediction !== 1);
-          const layer4Under8Pass =
-            !nextPred || (nextPred.topPrediction !== 8 && nextPred.topPrediction !== 9);
-
-          const over1Condition =
-            layer1Over1Pass && layer2Over1Pass && layer3Over1Pass && layer4Over1Pass;
-          const under8Condition =
-            layer1Under8Pass && layer2Under8Pass && layer3Under8Pass && layer4Under8Pass;
-
-          if (under8Condition || over1Condition) {
-            const signalType = over1Condition ? 'OVER 1' : 'UNDER 8';
-            const realContractType: 'DIGITOVER' | 'DIGITUNDER' = over1Condition
-              ? 'DIGITOVER'
-              : 'DIGITUNDER';
-            const realBarrier = over1Condition ? 1 : 8;
-            const virtualContractType: 'DIGITOVER' | 'DIGITUNDER' = over1Condition
-              ? 'DIGITUNDER'
-              : 'DIGITOVER';
-            const virtualBarrier = over1Condition ? 8 : 1;
-
-            const winProbPct = over1Condition
-              ? (pWinOver1 * 100).toFixed(1)
-              : (pWinUnder8 * 100).toFixed(1);
-            const predDigit = nextPred ? nextPred.topPrediction : 'N/A';
-            const predConf = nextPred ? (nextPred.confidence * 100).toFixed(1) : 'N/A';
-
-            hackerIsExecutingRef.current = true;
-            if (hackerContinuousSameMarketRef.current && !hackerLockedMarketRef.current) {
-              hackerLockedMarketRef.current = sym;
-              addHackerLog(
-                `[SAME MARKET LOCK] Signal confirmed on ${sym}. Locked for continuous same-market trades.`
-              );
-            }
-            addHackerLog(
-              `[SIGNAL CONFIRMED] ${sym} matched 4-Layer Math Filter -> ${signalType} (L1 P(Win): ${winProbPct}%, L2 Trig: ${digit}, L3 Trap: 0/4, L4 Pred: ${predDigit} @ ${predConf}%)`
-            );
-
-            if (
-              hasVirtualToken &&
-              hackerVirtualModeRef.current &&
-              (!hackerContinuousSameMarketRef.current ||
-                !hasTriggeredRealTradeForLockedMarketRef.current)
-            ) {
-              addHackerLog(
-                `[VIRTUAL SWITCH ACTIVE] Executing Virtual ${virtualContractType} ${virtualBarrier} on ${sym} (Target: ${hackerVirtualLossesRef.current} virtual loss(es))...`
-              );
-              handleVirtualThenRealSequence({
-                sym,
-                virtualContractType,
-                virtualBarrier,
-                realContractType,
-                realBarrier,
-                targetVirtualLosses: hackerVirtualLossesRef.current,
-              });
-            } else {
-              hasTriggeredRealTradeForLockedMarketRef.current = true;
-              addHackerLog(
-                `[EXECUTE REAL TRADE] Purchasing REAL ${realContractType} (Barrier ${realBarrier}) on ${sym} @ $${hackerCurrentStakeRef.current.toFixed(
-                  2
-                )}...`
-              );
-              handleRealTradeSequence(
-                sym,
-                realContractType,
-                realBarrier,
-                hackerCurrentStakeRef.current
-              );
-            }
-          } else if (
-            hackerContinuousSameMarketRef.current &&
-            hackerLockedMarketRef.current === sym
-          ) {
-            const isOver = trapCountOver1 === 0 && pWinOver1 >= pWinUnder8;
-            const isUnder = trapCountUnder8 === 0 && pWinUnder8 > pWinOver1;
-            if (isOver || isUnder) {
-              const realContractType: 'DIGITOVER' | 'DIGITUNDER' = isOver
-                ? 'DIGITOVER'
-                : 'DIGITUNDER';
-              const realBarrier = isOver ? 1 : 8;
-              const virtualContractType: 'DIGITOVER' | 'DIGITUNDER' = isOver
-                ? 'DIGITUNDER'
-                : 'DIGITOVER';
-              const virtualBarrier = isOver ? 8 : 1;
-
-              hackerIsExecutingRef.current = true;
-              if (
-                hasVirtualToken &&
-                hackerVirtualModeRef.current &&
-                !hasTriggeredRealTradeForLockedMarketRef.current
-              ) {
-                addHackerLog(
-                  `[CONTINUOUS VIRTUAL SESSION] Taking Virtual ${virtualContractType} ${virtualBarrier} on ${sym}...`
-                );
-                handleVirtualThenRealSequence({
-                  sym,
-                  virtualContractType,
-                  virtualBarrier,
-                  realContractType,
-                  realBarrier,
-                  targetVirtualLosses: hackerVirtualLossesRef.current,
-                });
-              } else {
-                hasTriggeredRealTradeForLockedMarketRef.current = true;
-                addHackerLog(
-                  `[CONTINUOUS REAL TRADE] Purchasing REAL ${realContractType} ${realBarrier} on locked market ${sym} @ $${hackerCurrentStakeRef.current.toFixed(
-                    2
-                  )}...`
-                );
-                handleRealTradeSequence(
-                  sym,
-                  realContractType,
-                  realBarrier,
-                  hackerCurrentStakeRef.current
-                );
-              }
-            }
-          }
-        }
-      }
-    };
-
-    ws.onerror = () => {
-      addHackerLog('[ERROR] Scanner WebSocket error.');
-    };
+    } catch (err: any) {
+      onNotifyError(err?.message || 'Failed to start AI Market Hacker.');
+    }
   };
-
-  useEffect(() => {
-    return () => {
-      if (hackerSocketRef.current) {
-        hackerSocketRef.current.close();
-      }
-    };
-  }, []);
 
   const summary = useMemo(
     () => hackerMathSummaries[hackerSelectedMathSymbol],

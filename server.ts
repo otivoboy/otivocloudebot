@@ -45,6 +45,21 @@ app.get('/api/snapshot', (_req, res) => {
   res.json(engine.getSnapshot());
 });
 
+app.post('/api/journal/log', (req, res) => {
+  const { level, message } = req.body ?? {};
+  const msg = typeof message === 'string' ? message.trim() : '';
+  if (!msg) {
+    res.status(400).json({ error: 'Log message is required.' });
+    return;
+  }
+  const allowedLevels = new Set(['info', 'win', 'loss', 'warn', 'error']);
+  const safeLevel = allowedLevels.has(String(level))
+    ? (String(level) as 'info' | 'win' | 'loss' | 'warn' | 'error')
+    : 'info';
+  engine.addLog(safeLevel, msg);
+  res.json({ ok: true });
+});
+
 app.post('/api/account/connect', async (req, res) => {
   try {
     const { token, authMode, accountId, appId, virtualToken } = req.body ?? {};
@@ -266,6 +281,128 @@ app.delete('/api/strategies/:id', (req, res) => {
     res.json({ ok: true });
   } catch (err: any) {
     res.status(400).json({ error: err?.message || 'Could not delete strategy.' });
+  }
+});
+
+// Cloud Bots Control Endpoints (AutoBot + Analysis Tool Bots running on cloud server)
+app.get('/api/cloud-bots/state', (_req, res) => {
+  res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+});
+
+app.put('/api/cloud-bots/autobot/config', (req, res) => {
+  try {
+    engine.cloudBots.updateAutoBotConfig(req.body ?? {});
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to update AutoBot cloud config.' });
+  }
+});
+
+app.post('/api/cloud-bots/autobot/start', (req, res) => {
+  try {
+    engine.cloudBots.startAutoBot(req.body?.config ?? req.body);
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to start cloud AutoBot.' });
+  }
+});
+
+app.post('/api/cloud-bots/autobot/stop', (_req, res) => {
+  try {
+    engine.cloudBots.stopAutoBot();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to stop cloud AutoBot.' });
+  }
+});
+
+app.post('/api/cloud-bots/autobot/reset', (_req, res) => {
+  try {
+    engine.cloudBots.resetAutoBot();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to reset cloud AutoBot.' });
+  }
+});
+
+app.post('/api/cloud-bots/grid-master/start', (req, res) => {
+  try {
+    engine.cloudBots.startGridMaster(req.body ?? {});
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to start Grid Master Bot.' });
+  }
+});
+
+app.post('/api/cloud-bots/grid-master/stop', (_req, res) => {
+  try {
+    engine.cloudBots.stopGridMaster();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to stop Grid Master Bot.' });
+  }
+});
+
+app.post('/api/cloud-bots/frequency/start', (req, res) => {
+  try {
+    engine.cloudBots.startFrequencyBot(req.body ?? {});
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to start Frequency Bot.' });
+  }
+});
+
+app.post('/api/cloud-bots/frequency/stop', (_req, res) => {
+  try {
+    engine.cloudBots.stopFrequencyBot();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to stop Frequency Bot.' });
+  }
+});
+
+app.post('/api/cloud-bots/ai-scanner/start', (req, res) => {
+  try {
+    engine.cloudBots.startAiScanner(req.body ?? {});
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to start AI Scanner Bot.' });
+  }
+});
+
+app.post('/api/cloud-bots/ai-scanner/stop', (_req, res) => {
+  try {
+    engine.cloudBots.stopAiScanner();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to stop AI Scanner Bot.' });
+  }
+});
+
+app.post('/api/cloud-bots/ai-scanner/clear-result', (_req, res) => {
+  try {
+    engine.cloudBots.clearAiScannerTpSl();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to clear AI Scanner result.' });
+  }
+});
+
+app.post('/api/cloud-bots/ai-hacker/start', (req, res) => {
+  try {
+    engine.cloudBots.startAiHacker(req.body ?? {});
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to start AI Market Hacker.' });
+  }
+});
+
+app.post('/api/cloud-bots/ai-hacker/stop', (_req, res) => {
+  try {
+    engine.cloudBots.stopAiHacker();
+    res.json({ cloudBots: engine.cloudBots.getSnapshot() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to stop AI Market Hacker.' });
   }
 });
 
